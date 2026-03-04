@@ -79,6 +79,10 @@ class EntrypointsModule: public jsg::Object {
 
   void waitUntil(kj::Promise<void> promise);
 
+  // Immediately condemn and terminate the current isolate. In workerd for now this just aborts the
+  // process.
+  void abortIsolate(jsg::Lock& js, jsg::Optional<kj::String> reason);
+
   JSG_RESOURCE_TYPE(EntrypointsModule) {
     JSG_NESTED_TYPE(WorkerEntrypoint);
     JSG_NESTED_TYPE(WorkflowEntrypoint);
@@ -90,6 +94,7 @@ class EntrypointsModule: public jsg::Object {
     JSG_NESTED_TYPE_NAMED(Fetcher, ServiceStub);
 
     JSG_METHOD(waitUntil);
+    JSG_METHOD(abortIsolate);
   }
 };
 

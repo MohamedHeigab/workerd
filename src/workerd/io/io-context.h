@@ -858,6 +858,9 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
     getIoChannelFactory().abortAllActors(reason);
   }
 
+  // Condemn and terminate JS isolate
+  void abortIsolate(kj::StringPtr reason = nullptr);
+
   // Get an HttpClient to use for Cache API subrequests.
   kj::Own<CacheClient> getCacheClient();
 

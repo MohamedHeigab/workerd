@@ -3455,6 +3455,16 @@ class Server::WorkerService final: public Service,
     abortActorsCallback(reason);
   }
 
+  // For now, in workerd just abort the process.
+  void abortIsolate(kj::StringPtr reason) override {
+    if (reason == nullptr) {
+      KJ_LOG(FATAL, "abortIsolate() called, terminating process");
+    } else {
+      KJ_LOG(FATAL, "abortIsolate() called, terminating process", reason);
+    }
+    ::abort();
+  }
+
   kj::Own<WorkerStubChannel> loadIsolate(uint loaderChannel,
       kj::Maybe<kj::String> name,
       kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource) override;

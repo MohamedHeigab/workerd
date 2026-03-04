@@ -58,4 +58,17 @@ void EntrypointsModule::waitUntil(kj::Promise<void> promise) {
   IoContext::current().addWaitUntil(kj::mv(promise));
 }
 
+void EntrypointsModule::abortIsolate(jsg::Lock& js, jsg::Optional<kj::String> message) {
+  auto& reason = message.orDefault(nullptr);
+  KJ_IF_SOME(context, IoContext::tryCurrent()) {
+    // In workerd this will abort the current process, in Edgeworker this will condemn and terminate
+    // the current isolate.
+    context.abortIsolate(reason);
+  } else {
+    LOG_NOSENTRY(ERROR, "abortIsolate() called at top level, terminating execution", reason)
+  }
+
+  js.terminateExecutionNow();
+}
+
 }  // namespace workerd::api

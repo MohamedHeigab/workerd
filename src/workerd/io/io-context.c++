@@ -477,6 +477,10 @@ void IoContext::abort(kj::Exception&& e) {
   abortFulfiller->reject(kj::mv(e));
 }
 
+void IoContext::abortIsolate(kj::StringPtr reason) {
+  getIoChannelFactory().abortIsolate(reason);
+}
+
 void IoContext::abortWhen(kj::Promise<void> promise) {
   // Unlike addTask(), abortWhen() always uses `tasks`, even in actors, because we do not want
   // these tasks to block hibernation.
