@@ -91,6 +91,17 @@ class SqliteDatabase {
       kj::Maybe<kj::WriteMode> maybeMode = kj::none,
       SqliteObserver& sqliteObserver = SqliteObserver::DEFAULT,
       kj::Maybe<const ActorAccountLimits&> actorAccountLimits = kj::none);
+
+  // Returns a pointer to the per-actor SQLite memory byte counter.
+  size_t* getSqliteMemoryCounter() {
+    return &sqliteMemoryBytes;
+  }
+
+  // Returns the current value of the per-actor SQLite memory byte counter for metrics reporting.
+  size_t getSqliteMemoryBytes() const {
+    return sqliteMemoryBytes;
+  }
+
   ~SqliteDatabase() noexcept(false);
   KJ_DISALLOW_COPY_AND_MOVE(SqliteDatabase);
 
@@ -316,6 +327,9 @@ class SqliteDatabase {
   bool readOnly;
   SqliteObserver& sqliteObserver;
   kj::Maybe<const ActorAccountLimits&> actorAccountLimits;
+
+  // The amound of memory in bytes used by this actor in bytes for use by sqlite3_mem_methods.
+  size_t sqliteMemoryBytes = 0;
 
   // This pointer can be left null if a call to reset() failed to re-open the database.
   kj::Maybe<sqlite3&> maybeDb;

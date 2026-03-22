@@ -992,6 +992,13 @@ void SqliteDatabase::reset() {
     vfs.directory.remove(path);
   }
 
+  // Reset the SQLite memory counter to zero after closing the connection. sqlite3_close() frees
+  // all internal SQLite allocations, but those frees may have been partially unaccounted (e.g.
+  // if some allocations were made outside of any SqliteMemoryScope). Zeroing here ensures the
+  // counter correctly reflects the empty state before init() charges the fresh connection's
+  // allocations, preventing spurious SQLITE_NOMEM errors during re-initialization.
+  sqliteMemoryBytes = 0;
+
   KJ_ON_SCOPE_FAILURE(maybeDb = kj::none);
   init(kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
 
