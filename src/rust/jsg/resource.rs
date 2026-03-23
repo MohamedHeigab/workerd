@@ -201,6 +201,38 @@ impl<R: Resource + 'static> FromJS for Rc<R> {
     }
 }
 
+/// Equality by pointer identity — two `Rc`s are equal iff they point to the
+/// same allocation, matching the behaviour of [`std::rc::Rc`].
+impl<R: Resource> PartialEq for Rc<R> {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.handle, &other.handle)
+    }
+}
+
+impl<R: Resource> Eq for Rc<R> {}
+
+/// Ordering by pointer address — consistent with `PartialEq` and allows
+/// `Rc<T>` to be used as a `BTreeSet`/`BTreeMap` key.
+impl<R: Resource> PartialOrd for Rc<R> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<R: Resource> Ord for Rc<R> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        std::rc::Rc::as_ptr(&self.handle).cmp(&std::rc::Rc::as_ptr(&other.handle))
+    }
+}
+
+/// Hashing by pointer address — consistent with `PartialEq` and allows
+/// `Rc<T>` to be used as a `HashSet`/`HashMap` key.
+impl<R: Resource> std::hash::Hash for Rc<R> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::rc::Rc::as_ptr(&self.handle).hash(state);
+    }
+}
+
 impl<R: Resource> fmt::Debug for Rc<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Rc")

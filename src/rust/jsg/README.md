@@ -83,6 +83,14 @@ let r: jsg::Rc<MyResource> = jsg::Rc::from_js(&mut lock, js_val)?;
 | `Cell<jsg::Rc<T>>` | Yes — strong edge | Use `Cell` when field needs interior mutability |
 | `Cell<Option<jsg::Rc<T>>>` | Yes — when `Some` | |
 | `Cell<jsg::Nullable<jsg::Rc<T>>>` | Yes — when `Some` | |
+| `Vec<jsg::Rc<T>>` | Yes — each element | Iterates and visits every `Rc` in the vec |
+| `HashMap<K, jsg::Rc<T>>` | Yes — each value | Iterates `.values()` and visits each `Rc` |
+| `BTreeMap<K, jsg::Rc<T>>` | Yes — each value | Iterates `.values()` and visits each `Rc` |
+| `HashSet<jsg::Rc<T>>` | Yes — each element | Iterates and visits every `Rc` |
+| `BTreeSet<jsg::Rc<T>>` | Yes — each element | Iterates and visits every `Rc` |
+| `Cell<Vec<jsg::Rc<T>>>` | Yes — each element | `Cell` variant of above |
+| `Cell<HashMap<K, jsg::Rc<T>>>` | Yes — each value | `Cell` variant of above |
+| Same patterns with `jsg::v8::Global<T>` | Yes | All collection forms work with `Global<T>` too |
 | `jsg::v8::Global<T>` | Yes — dual strong/traced | Enables cycle collection; see below |
 | `Option<jsg::v8::Global<T>>` | Yes — when `Some` | |
 | `jsg::Nullable<jsg::v8::Global<T>>` | Yes — when `Some` | |
@@ -92,6 +100,7 @@ let r: jsg::Rc<MyResource> = jsg::Rc::from_js(&mut lock, js_val)?;
 | Anything else | No | Plain data fields are ignored |
 
 - **`Cell<T>` for interior mutability**: `GarbageCollected::trace` takes `&self`. Fields that need to be mutated after construction (e.g. a callback set in a method) must be wrapped in `Cell<T>`. Both `Cell<T>` and `std::cell::Cell<T>` are recognised.
+- **No recursive nesting**: only one wrapper level around a traceable is supported. `Option<Vec<jsg::Rc<T>>>` is **not** automatically traced. Use a manual `GarbageCollected` implementation for deeper nesting.
 - **`jsg::v8::Global<T>` cycle collection**: Uses the same strong↔traced dual-mode as C++ `jsg::V8Ref<T>`. While the parent resource has strong Rust refs the JS handle stays strong. Once all Rust `Rc`s are dropped, `visit_global` downgrades the handle to a `v8::TracedReference` that cppgc can follow — allowing cycles (e.g. a resource holding a callback that captures its own wrapper) to be detected and collected.
 - **Circular references** through `jsg::Rc<T>` are **not** collected, matching C++ `jsg::Rc<T>` behavior.
 
