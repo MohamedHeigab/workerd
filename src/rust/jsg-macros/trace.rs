@@ -34,8 +34,8 @@ use syn::Type;
 // ---------------------------------------------------------------------------
 
 /// Classification of a JSG type that participates (or not) in GC tracing.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum TraceableType {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceableType {
     /// `jsg::Rc<T>` — strong GC edge; visited via `GcVisitor::visit_rc`.
     Ref,
     /// `jsg::Weak<T>` — weak reference, not traced (doesn't keep the target alive).
@@ -48,13 +48,13 @@ pub(crate) enum TraceableType {
 }
 
 /// Whether the wrapping optional type is `Option` or `jsg::Nullable`.
-pub(crate) enum OptionalKind {
+pub enum OptionalKind {
     Option,
     Nullable,
 }
 
 /// How to iterate over the traceable values in a collection field.
-pub(crate) enum CollectionIterStyle {
+pub enum CollectionIterStyle {
     /// `Vec<T>`, `HashSet<T>`, `BTreeSet<T>` — iterate elements directly.
     IterElements,
     /// `HashMap<K, V>`, `BTreeMap<K, V>` — iterate `.values()`.
@@ -67,7 +67,7 @@ pub(crate) enum CollectionIterStyle {
 
 /// Returns the `TraceableType` for `jsg::Rc<T>`, `jsg::Weak<T>`, or
 /// `jsg::v8::Global<T>`. Returns `None` for everything else.
-pub(crate) fn get_traceable_type(ty: &Type) -> TraceableType {
+pub fn get_traceable_type(ty: &Type) -> TraceableType {
     let Type::Path(type_path) = ty else {
         return TraceableType::None;
     };
@@ -95,7 +95,7 @@ pub(crate) fn get_traceable_type(ty: &Type) -> TraceableType {
 }
 
 /// Extracts the inner type from `Option<T>` or `Nullable<T>` if present.
-pub(crate) fn extract_optional_inner(ty: &Type) -> Option<(OptionalKind, &Type)> {
+pub fn extract_optional_inner(ty: &Type) -> Option<(OptionalKind, &Type)> {
     let Type::Path(type_path) = ty else {
         return None;
     };
@@ -115,7 +115,7 @@ pub(crate) fn extract_optional_inner(ty: &Type) -> Option<(OptionalKind, &Type)>
 }
 
 /// Extracts the inner type `T` from `Cell<T>` or `std::cell::Cell<T>`.
-pub(crate) fn extract_cell_inner(ty: &Type) -> Option<&Type> {
+pub fn extract_cell_inner(ty: &Type) -> Option<&Type> {
     let Type::Path(type_path) = ty else {
         return None;
     };
@@ -149,9 +149,7 @@ pub(crate) fn extract_cell_inner(ty: &Type) -> Option<&Type> {
 /// Accepts both unqualified names (`Vec<T>`) and path-qualified forms
 /// (`std::collections::HashMap<K, V>`, `std::vec::Vec<T>`, etc.) by matching
 /// only on the **last** path segment.
-pub(crate) fn extract_collection_traceable(
-    ty: &Type,
-) -> Option<(CollectionIterStyle, TraceableType)> {
+pub fn extract_collection_traceable(ty: &Type) -> Option<(CollectionIterStyle, TraceableType)> {
     let Type::Path(type_path) = ty else {
         return None;
     };
@@ -197,7 +195,7 @@ pub(crate) fn extract_collection_traceable(
 /// `accessor` is the expression that borrows the collection:
 /// - direct field: `quote! { &self.#field_name }`
 /// - `Cell<…>` field: `quote! { unsafe { &*self.#field_name.as_ptr() } }`
-pub(crate) fn generate_collection_trace_loop(
+pub fn generate_collection_trace_loop(
     accessor: &quote::__private::TokenStream,
     style: &CollectionIterStyle,
     traceable: TraceableType,
@@ -228,7 +226,7 @@ pub(crate) fn generate_collection_trace_loop(
 /// read through the cell without requiring `T: Copy`.  This is sound because V8
 /// GC tracing is always single-threaded within an isolate and is never re-entrant
 /// on the same object during a single GC cycle.
-pub(crate) fn generate_cell_trace_statement(
+pub fn generate_cell_trace_statement(
     field_name: &syn::Ident,
     cell_inner_ty: &Type,
 ) -> Option<quote::__private::TokenStream> {
@@ -294,8 +292,18 @@ pub(crate) fn generate_cell_trace_statement(
     None
 }
 
+/// Returns `true` if the field has a `#[trace]` attribute.
+///
+/// The `#[trace]` attribute marks a plain Rust struct field (not a `jsg::Rc<T>`)
+/// as requiring GC tracing by delegation — the generated `trace()` body will call
+/// `self.field.trace(visitor)` on it. The field's type must implement
+/// `jsg::GarbageCollected`; this is enforced at compile time via the `.trace()` call.
+pub fn has_trace_attr(field: &syn::Field) -> bool {
+    field.attrs.iter().any(|a| a.path().is_ident("trace"))
+}
+
 /// Generates all trace statements for the fields of a `#[jsg_resource]` struct.
-pub(crate) fn generate_trace_statements(
+pub fn generate_trace_statements(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
 ) -> Vec<quote::__private::TokenStream> {
     use quote::quote;
@@ -305,6 +313,14 @@ pub(crate) fn generate_trace_statements(
         .filter_map(|field| {
             let field_name = field.ident.as_ref()?;
             let ty = &field.ty;
+
+            // #[trace] — explicit delegation: field type must implement GarbageCollected.
+            // Checked before the automatic type-based cascade so it takes priority.
+            if has_trace_attr(field) {
+                return Some(quote! {
+                    jsg::GarbageCollected::trace(&self.#field_name, visitor);
+                });
+            }
 
             // Cell<T> — read through pointer with SAFETY invariant.
             if let Some(cell_inner_ty) = extract_cell_inner(ty) {
@@ -492,5 +508,24 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(style, CollectionIterStyle::IterValues));
+    }
+
+    #[test]
+    fn has_trace_attr_cases() {
+        // Field with #[trace] — detected.
+        let field: syn::Field = parse_quote! { #[trace] pub data: PrivateData };
+        assert!(has_trace_attr(&field));
+
+        // Field with other attribute — not detected.
+        let field: syn::Field = parse_quote! { #[allow(dead_code)] pub data: PrivateData };
+        assert!(!has_trace_attr(&field));
+
+        // Field with no attributes — not detected.
+        let field: syn::Field = parse_quote! { pub data: PrivateData };
+        assert!(!has_trace_attr(&field));
+
+        // Field with #[trace] alongside another attr — still detected.
+        let field: syn::Field = parse_quote! { #[allow(dead_code)] #[trace] pub data: PrivateData };
+        assert!(has_trace_attr(&field));
     }
 }

@@ -12,7 +12,7 @@ use syn::Fields;
 
 /// Extracts named fields from a struct, returning an empty list for unit structs.
 /// Returns `Err` with a compile error for tuple structs or non-struct data.
-pub(crate) fn extract_named_fields(
+pub fn extract_named_fields(
     input: &DeriveInput,
     macro_name: &str,
 ) -> Result<syn::punctuated::Punctuated<syn::Field, syn::token::Comma>, TokenStream> {
@@ -34,18 +34,35 @@ pub(crate) fn extract_named_fields(
 
 /// Checks if an attribute matches a given name, handling both unqualified (`#[jsg_method]`)
 /// and qualified (`#[jsg_macros::jsg_method]`) paths.
-pub(crate) fn is_attr(attr: &syn::Attribute, name: &str) -> bool {
+pub fn is_attr(attr: &syn::Attribute, name: &str) -> bool {
     attr.path().is_ident(name) || attr.path().segments.last().is_some_and(|s| s.ident == name)
 }
 
+/// Returns `true` if the `custom_trace` bare word is present in the attribute token stream.
+///
+/// Handles both bare `custom_trace` and combined forms like `name = "Foo", custom_trace`.
+/// When set, `#[jsg_resource]` on a struct suppresses the auto-generated `GarbageCollected`
+/// impl, letting the user write their own.
+pub fn has_custom_trace_flag(attr: &TokenStream) -> bool {
+    // Parse as comma-separated meta items and look for a bare `custom_trace` ident.
+    // Converting to string is robust for the simple `name = "...", custom_trace` grammar.
+    custom_trace_in_str(&attr.to_string())
+}
+
+/// Pure string-based check extracted for testability (`proc_macro::TokenStream`
+/// cannot be constructed outside a proc-macro invocation).
+fn custom_trace_in_str(s: &str) -> bool {
+    s.split(',').any(|part| part.trim() == "custom_trace")
+}
+
 /// Emits a `compile_error!` token stream anchored to `tokens` with message `msg`.
-pub(crate) fn error(tokens: &impl ToTokens, msg: &str) -> TokenStream {
+pub fn error(tokens: &impl ToTokens, msg: &str) -> TokenStream {
     syn::Error::new_spanned(tokens, msg)
         .to_compile_error()
         .into()
 }
 
-pub(crate) fn extract_name_attribute(tokens: TokenStream) -> Option<String> {
+pub fn extract_name_attribute(tokens: TokenStream) -> Option<String> {
     let nv: syn::MetaNameValue = syn::parse(tokens).ok()?;
     if !nv.path.is_ident("name") {
         return None;
@@ -62,7 +79,7 @@ pub(crate) fn extract_name_attribute(tokens: TokenStream) -> Option<String> {
 }
 
 /// Converts a `snake_case` identifier to `camelCase`.
-pub(crate) fn snake_to_camel(s: &str) -> String {
+pub fn snake_to_camel(s: &str) -> String {
     let mut result = String::new();
     let mut cap_next = false;
     for (i, c) in s.chars().enumerate() {
@@ -80,7 +97,7 @@ pub(crate) fn snake_to_camel(s: &str) -> String {
 }
 
 /// Checks if a type is `Result<T, E>`.
-pub(crate) fn is_result_type(ty: &syn::Type) -> bool {
+pub fn is_result_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(type_path) = ty
         && let Some(segment) = type_path.path.segments.last()
     {
@@ -93,7 +110,7 @@ pub(crate) fn is_result_type(ty: &syn::Type) -> bool {
 ///
 /// When a method's first typed parameter matches this pattern, the macro passes the
 /// callback's `lock` directly instead of extracting it from JavaScript arguments.
-pub(crate) fn is_lock_ref(ty: &syn::Type) -> bool {
+pub fn is_lock_ref(ty: &syn::Type) -> bool {
     let syn::Type::Reference(ref_type) = ty else {
         return false;
     };
@@ -165,5 +182,20 @@ mod tests {
         assert!(!is_attr(&simple.attrs[0], "jsg_resource"));
         // Qualified path (`jsg_macros::jsg_method`) must also match by last segment.
         assert!(is_attr(&qualified.attrs[0], "jsg_method"));
+    }
+
+    #[test]
+    fn custom_trace_in_str_cases() {
+        // Bare flag.
+        assert!(custom_trace_in_str("custom_trace"));
+        // Combined with name — flag must be detected regardless of order.
+        assert!(custom_trace_in_str(r#"name = "Foo" , custom_trace"#));
+        assert!(custom_trace_in_str(r#"custom_trace , name = "Foo""#));
+        // Name only — no flag.
+        assert!(!custom_trace_in_str(r#"name = "Foo""#));
+        // Empty — no flag.
+        assert!(!custom_trace_in_str(""));
+        // Substring match must not fire (e.g. "not_custom_trace").
+        assert!(!custom_trace_in_str("not_custom_trace"));
     }
 }

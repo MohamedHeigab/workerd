@@ -18,13 +18,18 @@ use crate::trace::generate_trace_statements;
 use crate::utils::error;
 use crate::utils::extract_name_attribute;
 use crate::utils::extract_named_fields;
+use crate::utils::has_custom_trace_flag;
 use crate::utils::is_attr;
 use crate::utils::is_lock_ref;
 use crate::utils::snake_to_camel;
 
 /// Entry point called from `lib.rs` for `#[jsg_resource]` on a struct.
-pub(crate) fn generate_resource_struct(attr: TokenStream, input: syn::DeriveInput) -> TokenStream {
-    let name: &syn::Ident = &input.ident;
+pub fn generate_resource_struct(attr: TokenStream, mut input: syn::DeriveInput) -> TokenStream {
+    // Check for `#[jsg_resource(custom_trace)]` before consuming `attr`.
+    let custom_trace = has_custom_trace_flag(&attr);
+
+    // Clone the name before mutating `input` so we can borrow freely later.
+    let name = input.ident.clone();
 
     let class_name = if attr.is_empty() {
         name.to_string()
@@ -40,23 +45,33 @@ pub(crate) fn generate_resource_struct(attr: TokenStream, input: syn::DeriveInpu
     let trace_statements = generate_trace_statements(&fields);
     let name_str = name.to_string();
 
-    let gc_impl = quote! {
-        #[automatically_derived]
-        impl jsg::GarbageCollected for #name {
-            fn trace(&self, visitor: &mut jsg::GcVisitor) {
-                // Suppress unused warning when there are no traceable fields.
-                let _ = visitor;
-                #(#trace_statements)*
-            }
+    // Strip `#[trace]` attributes from field definitions before emitting the struct.
+    // `#[trace]` is a jsg-macros-internal marker; leaving it in the output would cause
+    // the compiler to reject it as an unknown attribute on a struct field.
+    strip_trace_attrs(&mut input);
 
-            fn memory_name(&self) -> &'static ::std::ffi::CStr {
-                // from_bytes_with_nul on a concat!(name, "\0") literal is a
-                // compile-time constant expression — the compiler folds the
-                // unwrap and emits a direct pointer into the read-only data
-                // segment. The C++ side constructs a kj::StringPtr directly
-                // from data()+size() with no allocation.
-                ::std::ffi::CStr::from_bytes_with_nul(concat!(#name_str, "\0").as_bytes())
-                    .unwrap()
+    let gc_impl = if custom_trace {
+        // `custom_trace` suppresses the generated impl — the user will write their own.
+        quote! {}
+    } else {
+        quote! {
+            #[automatically_derived]
+            impl jsg::GarbageCollected for #name {
+                fn trace(&self, visitor: &mut jsg::GcVisitor) {
+                    // Suppress unused warning when there are no traceable fields.
+                    let _ = visitor;
+                    #(#trace_statements)*
+                }
+
+                fn memory_name(&self) -> &'static ::std::ffi::CStr {
+                    // from_bytes_with_nul on a concat!(name, "\0") literal is a
+                    // compile-time constant expression — the compiler folds the
+                    // unwrap and emits a direct pointer into the read-only data
+                    // segment. The C++ side constructs a kj::StringPtr directly
+                    // from data()+size() with no allocation.
+                    ::std::ffi::CStr::from_bytes_with_nul(concat!(#name_str, "\0").as_bytes())
+                        .unwrap()
+                }
             }
         }
     };
@@ -101,8 +116,23 @@ pub(crate) fn generate_resource_struct(attr: TokenStream, input: syn::DeriveInpu
     .into()
 }
 
+/// Removes `#[trace]` attributes from all named fields in a `DeriveInput`.
+///
+/// `#[trace]` is consumed by the jsg-macros proc macro during trace statement
+/// generation. It must not appear in the final emitted struct definition —
+/// the compiler would reject it as an unrecognised attribute.
+fn strip_trace_attrs(input: &mut syn::DeriveInput) {
+    if let syn::Data::Struct(ref mut data) = input.data
+        && let syn::Fields::Named(ref mut fields) = data.fields
+    {
+        for field in &mut fields.named {
+            field.attrs.retain(|a| !a.path().is_ident("trace"));
+        }
+    }
+}
+
 /// Entry point called from `lib.rs` for `#[jsg_resource]` on an impl block.
-pub(crate) fn generate_resource_impl(impl_block: &ItemImpl) -> TokenStream {
+pub fn generate_resource_impl(impl_block: &ItemImpl) -> TokenStream {
     let self_ty = &impl_block.self_ty;
 
     if !matches!(&**self_ty, syn::Type::Path(_)) {

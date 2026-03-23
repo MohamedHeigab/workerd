@@ -202,8 +202,40 @@ after construction, because `GarbageCollected::trace` receives `&self`.
 
 > **Note:** Nesting is not recursive. `Option<Vec<jsg::Rc<T>>>` is **not** automatically
 > traced — only one level of wrapping around the traceable is supported (e.g. `Option<jsg::Rc<T>>`
-> or `Vec<jsg::Rc<T>>`, but not `Option<Vec<jsg::Rc<T>>>`). For such cases, implement
-> `GarbageCollected` manually (see [Custom tracing](#custom-tracing)).
+> or `Vec<jsg::Rc<T>>`, but not `Option<Vec<jsg::Rc<T>>>`). For such cases use
+> `#[trace]` delegation or `custom_trace` (see below).
+
+### Delegating to a nested struct with `#[trace]`
+
+To mirror the C++ `PrivateData::visitForGc` pattern, annotate a field with `#[trace]`.
+The macro emits `jsg::GarbageCollected::trace(&self.field, visitor)` for that field.
+The field's type must implement `GarbageCollected` — enforced at compile time.
+
+The `#[trace]` attribute is stripped from the emitted struct definition, so the
+compiler never sees it as an unknown attribute.
+
+```rust
+/// Plain Rust struct (not a resource) that holds traceable handles.
+struct EventHandlers {
+    on_message: Option<jsg::v8::Global<jsg::v8::Value>>,
+    on_error:   Option<jsg::v8::Global<jsg::v8::Value>>,
+}
+
+impl jsg::GarbageCollected for EventHandlers {
+    fn trace(&self, visitor: &mut jsg::GcVisitor) {
+        if let Some(ref h) = self.on_message { visitor.visit_global(h); }
+        if let Some(ref h) = self.on_error   { visitor.visit_global(h); }
+    }
+    fn memory_name(&self) -> &'static std::ffi::CStr { c"EventHandlers" }
+}
+
+#[jsg_resource]
+pub struct MySocket {
+    #[trace]               // ← emits: EventHandlers::trace(&self.handlers, visitor)
+    handlers: EventHandlers,
+    name: String,          // plain data — ignored
+}
+```
 
 ```rust
 use std::cell::Cell;
@@ -238,22 +270,29 @@ strong. Once all `Rc`s are dropped and only the JS wrapper keeps the resource al
 follow — allowing back-reference cycles (e.g. a resource that stores a callback
 which closes over its own JS wrapper) to be detected and collected on the next full GC.
 
-### Custom tracing
+### Custom tracing with `custom_trace`
 
-If the generated `trace()` body is insufficient, implement `GarbageCollected`
-manually instead of using `#[jsg_resource]` on the struct:
+For cases where `#[trace]` delegation is not enough, use
+`#[jsg_resource(custom_trace)]` to suppress the generated `GarbageCollected` impl
+and write your own. The macro still generates `jsg::Type`, `jsg::ToJS`, and
+`jsg::FromJS` — only the GC impl is omitted.
 
 ```rust
-impl jsg::GarbageCollected for CustomResource {
+#[jsg_resource(custom_trace)]
+pub struct DynamicResource {
+    slots: Vec<Option<jsg::Rc<Handler>>>,
+}
+
+impl jsg::GarbageCollected for DynamicResource {
     fn trace(&self, visitor: &mut jsg::GcVisitor) {
-        // custom logic
-        for item in &self.dynamic_children {
-            visitor.visit_rc(item);
+        for slot in &self.slots {
+            if let Some(ref h) = slot {
+                visitor.visit_rc(h);
+            }
         }
     }
-
-    fn memory_name(&self) -> &'static std::ffi::CStr {
-        c"CustomResource"
-    }
+    fn memory_name(&self) -> &'static std::ffi::CStr { c"DynamicResource" }
 }
 ```
+
+`custom_trace` can be combined with `name`: `#[jsg_resource(name = "MyName", custom_trace)]`.
