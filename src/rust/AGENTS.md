@@ -9,7 +9,7 @@
 | Crate                | Purpose                                                                                                |
 | -------------------- | ------------------------------------------------------------------------------------------------------ |
 | `jsg/`               | Rust JSG bindings: `Lock`, `Rc<T>`, `Resource`, `Struct`, `Type`, `Realm`, `FeatureFlags`, module registration |
-| `jsg-macros/`        | Proc macros: `#[jsg_struct]`, `#[jsg_method]`, `#[jsg_resource]`, `#[jsg_oneof]`, `#[jsg_static_constant]` |
+| `jsg-macros/`        | Proc macros: `#[jsg_struct]`, `#[jsg_method]`, `#[jsg_resource]`, `#[jsg_oneof]`, `#[jsg_static_constant]`, `#[jsg_traceable]`, `#[jsg_trace]`, `#[jsg_constructor]` |
 | `jsg-test/`          | Test harness (`Harness`) for JSG Rust bindings                                                         |
 | `api/`               | Rust-implemented Node.js APIs; registers modules via `register_nodejs_modules()`                       |
 | `dns/`               | DNS record parsing (CAA, NAPTR) via CXX bridge; legacy duplicate of `api/dns.rs`, pending removal      |
@@ -25,7 +25,10 @@
 - **CXX bridge**: `#[cxx::bridge(namespace = "workerd::rust::<crate>")]` with companion `ffi.c++`/`ffi.h` files
 - **Namespace**: always `workerd::rust::*` except `python-parser` → `edgeworker::rust::python_parser`
 - **Errors**: `thiserror` for library crates; `jsg::Error` with `ExceptionType` for JSG-facing crates
-- **JSG resources**: `#[jsg_resource]` on struct + impl block; `#[jsg_method]` auto-converts `snake_case` → `camelCase`; methods with `&self`/`&mut self` become instance methods, methods without a receiver become static methods; `#[jsg_static_constant]` on `const` items exposes read-only numeric constants on both constructor and prototype (name kept as-is, no camelCase); resources integrate with GC via the `GarbageCollected` trait (auto-derived for `Rc<T>`, `WeakRc<T>`, `Option<Rc<T>>`, and `Nullable<Rc<T>>` fields)
+- **JSG resources**: `#[jsg_resource]` on struct + impl block; `#[jsg_method]` auto-converts `snake_case` → `camelCase`; methods with `&self`/`&mut self` become instance methods, methods without a receiver become static methods; `#[jsg_static_constant]` on `const` items exposes read-only numeric constants on both constructor and prototype (name kept as-is, no camelCase); resources integrate with GC via the `GarbageCollected` trait — automatically derived for `jsg::Rc<T>`, `jsg::Weak<T>`, `Option<Rc<T>>`, `Nullable<Rc<T>>`, `Vec<Rc<T>>`, `HashMap<K,Rc<T>>`, `BTreeMap`, `HashSet`, `BTreeSet`, and `Cell<T>` wrappers of any of the above; see `jsg-macros/README.md` for the full table
+- **`#[jsg_trace]`**: field attribute on a `#[jsg_resource]` or `#[jsg_traceable]` struct/enum — delegates GC tracing to the field type via `GarbageCollected::trace`; the field type must implement `GarbageCollected` (manually or via `#[jsg_traceable]`); the attribute is stripped from the emitted definition
+- **`#[jsg_traceable]`**: generates `GarbageCollected` for plain structs and enums (the `kj::OneOf` state-machine pattern); enums get one `match` arm per variant, tracing GC-visible fields in each arm; use with `#[jsg_trace]` to compose tracing across nested types
+- **`#[jsg_resource(custom_trace)]`**: suppresses the auto-generated `GarbageCollected` impl so the user can write their own; `jsg::Type`, `jsg::ToJS`, and `jsg::FromJS` are still generated
 - **Formatting**: `rustfmt.toml` — `group_imports = "StdExternalCrate"`, `imports_granularity = "Item"` (one `use` per import)
 - **Linting**: `just clippy <crate>` — pedantic+nursery; `allow-unwrap-in-tests`
 - **Tests**: inline `#[cfg(test)]` modules; JSG tests use `jsg_test::Harness::run_in_context()`

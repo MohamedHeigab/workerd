@@ -324,6 +324,12 @@ impl Drop for HashSetParent {
 impl HashSetParent {}
 
 /// `HashSet<jsg::Rc<T>>` elements are kept alive while parent JS wrapper is reachable.
+// jsg::Rc uses pointer-identity Hash+Eq, so interior mutability (Cell fields) doesn't
+// affect correctness. Suppress the mutable_key_type lint that fires on HashSet::new().
+#[expect(
+    clippy::mutable_key_type,
+    reason = "jsg::Rc hashes by pointer address, not interior state"
+)]
 #[test]
 fn hashset_rc_elements_kept_alive_through_gc() {
     LEAF_DROPS.store(0, Ordering::SeqCst);
@@ -407,6 +413,11 @@ impl Drop for BTreeSetParent {
 impl BTreeSetParent {}
 
 /// `BTreeSet<jsg::Rc<T>>` elements are kept alive while parent JS wrapper is reachable.
+// Same pointer-identity rationale as the HashSet test above.
+#[expect(
+    clippy::mutable_key_type,
+    reason = "jsg::Rc orders by pointer address, not interior state"
+)]
 #[test]
 fn btreeset_rc_elements_kept_alive_through_gc() {
     LEAF_DROPS.store(0, Ordering::SeqCst);
@@ -683,7 +694,7 @@ fn vec_rc_child_kept_alive_by_parent_after_rust_ref_dropped() {
     VEC_PARENT_DROPS.store(0, Ordering::SeqCst);
 
     let harness = crate::Harness::new();
-    harness.run_in_context(|lock, ctx| {
+    harness.run_in_context(|lock, _ctx| {
         let child = jsg::Rc::new(Leaf { value: 42 });
 
         let parent = jsg::Rc::new(VecParent {
@@ -771,7 +782,7 @@ fn hashmap_integer_key_rc_values_traced() {
 }
 
 // =============================================================================
-// #[trace] — nested struct delegation
+// #[jsg_trace] — nested struct delegation
 //
 // Mirrors the C++ pattern:
 //   struct PrivateData { void visitForGc(jsg::GcVisitor&) { ... } };
@@ -781,7 +792,7 @@ fn hashmap_integer_key_rc_values_traced() {
 static TRACE_DELEGATION_PARENT_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 /// A plain Rust struct (not a jsg resource) that holds traceable children.
-/// It manually implements `GarbageCollected` so the macro can delegate via `#[trace]`.
+/// It manually implements `GarbageCollected` so the macro can delegate via `#[jsg_trace]`.
 struct PrivateData {
     child: jsg::Rc<Leaf>,
 }
@@ -796,11 +807,11 @@ impl jsg::GarbageCollected for PrivateData {
     }
 }
 
-/// Resource with a `#[trace]`-annotated field — the macro delegates tracing to
+/// Resource with a `#[jsg_trace]`-annotated field — the macro delegates tracing to
 /// `PrivateData::trace` rather than inspecting `PrivateData`'s fields directly.
 #[jsg_resource]
 struct TraceDelegationParent {
-    #[trace]
+    #[jsg_trace]
     pub data: PrivateData,
 }
 
@@ -813,7 +824,7 @@ impl Drop for TraceDelegationParent {
 #[jsg_resource]
 impl TraceDelegationParent {}
 
-/// Children held inside a `#[trace]`-delegated struct are kept alive while the
+/// Children held inside a `#[jsg_trace]`-delegated struct are kept alive while the
 /// parent JS wrapper is reachable.
 #[test]
 fn trace_delegation_child_kept_alive_through_gc() {

@@ -100,8 +100,9 @@ let r: jsg::Rc<MyResource> = jsg::Rc::from_js(&mut lock, js_val)?;
 | Anything else | No | Plain data fields are ignored |
 
 - **`Cell<T>` for interior mutability**: `GarbageCollected::trace` takes `&self`. Fields that need to be mutated after construction (e.g. a callback set in a method) must be wrapped in `Cell<T>`. Both `Cell<T>` and `std::cell::Cell<T>` are recognised.
-- **No recursive nesting**: only one wrapper level around a traceable is supported. `Option<Vec<jsg::Rc<T>>>` is **not** automatically traced. Use `#[trace]` delegation or `custom_trace` for deeper nesting (see `jsg-macros/README.md`).
-- **`#[trace]` field attribute**: marks a plain Rust struct field (not a `jsg::Rc`) for tracing by delegation. The field's type must implement `GarbageCollected`. Emits `field.trace(visitor)` in the generated body.
+- **No recursive nesting**: only one wrapper level around a traceable is supported. `Option<Vec<jsg::Rc<T>>>` is **not** automatically traced. Use `#[jsg_trace]` delegation or `custom_trace` for deeper nesting (see `jsg-macros/README.md`).
+- **`#[jsg_trace]` field attribute**: marks a plain Rust struct field (not a `jsg::Rc`) for tracing by delegation. The field's type must implement `GarbageCollected`. Emits `field.trace(visitor)` in the generated body.
+- **`#[jsg_traceable]`**: generates `GarbageCollected` for plain structs and enums (the `kj::OneOf` state-machine pattern). Enums get one match arm per variant; each arm traces GC-visible fields in that variant. Use with `#[jsg_trace]` to compose tracing across types.
 - **`#[jsg_resource(custom_trace)]`**: suppresses the generated `GarbageCollected` impl entirely so you can write your own. `Type`, `ToJS`, and `FromJS` are still generated.
 - **`jsg::v8::Global<T>` cycle collection**: Uses the same strong↔traced dual-mode as C++ `jsg::V8Ref<T>`. While the parent resource has strong Rust refs the JS handle stays strong. Once all Rust `Rc`s are dropped, `visit_global` downgrades the handle to a `v8::TracedReference` that cppgc can follow — allowing cycles (e.g. a resource holding a callback that captures its own wrapper) to be detected and collected.
 - **Circular references** through `jsg::Rc<T>` are **not** collected, matching C++ `jsg::Rc<T>` behavior.

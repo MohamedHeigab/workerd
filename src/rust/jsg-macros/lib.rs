@@ -6,19 +6,21 @@
 //!
 //! # Macros
 //!
-//! | Macro                  | Apply to        | Purpose                                              |
-//! |------------------------|-----------------|------------------------------------------------------|
-//! | `#[jsg_resource]`      | struct / impl   | Expose a Rust type to JavaScript as a GC resource    |
-//! | `#[jsg_method]`        | fn inside impl  | Register a method (instance or static) on a resource |
-//! | `#[jsg_constructor]`   | fn inside impl  | Register `new MyResource(…)` JavaScript constructor  |
+//! | Macro                  | Apply to         | Purpose                                                        |
+//! |------------------------|------------------|----------------------------------------------------------------|
+//! | `#[jsg_resource]`      | struct / impl    | Expose a Rust type to JavaScript as a GC resource              |
+//! | `#[jsg_method]`        | fn inside impl   | Register a method (instance or static) on a resource           |
+//! | `#[jsg_constructor]`   | fn inside impl   | Register `new MyResource(…)` JavaScript constructor            |
 //! | `#[jsg_static_constant]` | const inside impl | Expose a numeric constant on both constructor and prototype |
-//! | `#[jsg_struct]`        | struct          | Expose a Rust struct as a plain JavaScript object    |
-//! | `#[jsg_oneof]`         | enum            | Accept one of several JavaScript types (`kj::OneOf`) |
+//! | `#[jsg_struct]`        | struct           | Expose a Rust struct as a plain JavaScript object              |
+//! | `#[jsg_oneof]`         | enum             | Accept one of several JavaScript types (`kj::OneOf`)           |
+//! | `#[jsg_traceable]`     | struct / enum    | Generate `GarbageCollected` for helper types and state enums   |
 //!
 //! See [`jsg/README.md`](../jsg/README.md) for full usage documentation.
 
 mod resource;
 mod trace;
+mod traceable;
 mod utils;
 
 use proc_macro::TokenStream;
@@ -32,6 +34,7 @@ use syn::FnArg;
 use syn::ItemFn;
 use syn::ItemImpl;
 use syn::parse_macro_input;
+use traceable::generate_traceable;
 use utils::error;
 use utils::extract_name_attribute;
 use utils::extract_named_fields;
@@ -301,6 +304,49 @@ pub fn jsg_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
     let input = parse_macro_input!(item as DeriveInput);
     generate_resource_struct(attr, input)
+}
+
+// =============================================================================
+// #[jsg_traceable]
+// =============================================================================
+
+/// Generates a `jsg::GarbageCollected` implementation for a plain struct or
+/// enum, without exposing the type to JavaScript.
+///
+/// Use this for helper types that hold GC-visible handles but are not themselves
+/// JavaScript resources:
+///
+/// - **Enums** — mirrors the `kj::OneOf` state-machine pattern. Each variant
+///   is matched and its GC-visible fields are visited. Unit variants produce
+///   empty arms; named-field and tuple variants trace every field that contains
+///   a `jsg::Rc<T>`, `jsg::v8::Global<T>`, collection of traceable types,
+///   optional traceable type, or `#[jsg_trace]`-delegated sub-struct.
+///
+/// - **Plain structs** — same as the auto-derived tracing in `#[jsg_resource]`
+///   but for types that are not resources, avoiding the need to write
+///   `GarbageCollected` by hand. The type can then be used as a `#[jsg_trace]`
+///   field inside a `#[jsg_resource]`.
+///
+/// ```ignore
+/// #[jsg_traceable]
+/// enum StreamState {
+///     Closed,                                        // unit — no-op arm
+///     Errored { reason: jsg::Rc<ErrorObject> },      // visits reason
+///     Readable(ReadableImpl),                        // delegates via #[jsg_trace]
+/// }
+///
+/// #[jsg_resource]
+/// pub struct ReadableStream {
+///     #[jsg_trace]
+///     state: StreamState,
+/// }
+/// ```
+///
+/// Override the `memory_name()` string with `#[jsg_traceable(name = "MyName")]`.
+#[proc_macro_attribute]
+pub fn jsg_traceable(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    generate_traceable(attr, input)
 }
 
 // =============================================================================

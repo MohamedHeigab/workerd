@@ -292,14 +292,14 @@ pub fn generate_cell_trace_statement(
     None
 }
 
-/// Returns `true` if the field has a `#[trace]` attribute.
+/// Returns `true` if the field has a `#[jsg_trace]` attribute.
 ///
-/// The `#[trace]` attribute marks a plain Rust struct field (not a `jsg::Rc<T>`)
+/// The `#[jsg_trace]` attribute marks a plain Rust struct field (not a `jsg::Rc<T>`)
 /// as requiring GC tracing by delegation — the generated `trace()` body will call
 /// `self.field.trace(visitor)` on it. The field's type must implement
 /// `jsg::GarbageCollected`; this is enforced at compile time via the `.trace()` call.
-pub fn has_trace_attr(field: &syn::Field) -> bool {
-    field.attrs.iter().any(|a| a.path().is_ident("trace"))
+pub fn has_jsg_trace_attr(field: &syn::Field) -> bool {
+    field.attrs.iter().any(|a| a.path().is_ident("jsg_trace"))
 }
 
 /// Generates all trace statements for the fields of a `#[jsg_resource]` struct.
@@ -314,9 +314,9 @@ pub fn generate_trace_statements(
             let field_name = field.ident.as_ref()?;
             let ty = &field.ty;
 
-            // #[trace] — explicit delegation: field type must implement GarbageCollected.
+            // #[jsg_trace] — explicit delegation: field type must implement GarbageCollected.
             // Checked before the automatic type-based cascade so it takes priority.
-            if has_trace_attr(field) {
+            if has_jsg_trace_attr(field) {
                 return Some(quote! {
                     jsg::GarbageCollected::trace(&self.#field_name, visitor);
                 });
@@ -511,21 +511,22 @@ mod tests {
     }
 
     #[test]
-    fn has_trace_attr_cases() {
-        // Field with #[trace] — detected.
-        let field: syn::Field = parse_quote! { #[trace] pub data: PrivateData };
-        assert!(has_trace_attr(&field));
+    fn has_jsg_trace_attr_cases() {
+        // Field with #[jsg_trace] — detected.
+        let field: syn::Field = parse_quote! { #[jsg_trace] pub data: PrivateData };
+        assert!(has_jsg_trace_attr(&field));
 
         // Field with other attribute — not detected.
         let field: syn::Field = parse_quote! { #[allow(dead_code)] pub data: PrivateData };
-        assert!(!has_trace_attr(&field));
+        assert!(!has_jsg_trace_attr(&field));
 
         // Field with no attributes — not detected.
         let field: syn::Field = parse_quote! { pub data: PrivateData };
-        assert!(!has_trace_attr(&field));
+        assert!(!has_jsg_trace_attr(&field));
 
-        // Field with #[trace] alongside another attr — still detected.
-        let field: syn::Field = parse_quote! { #[allow(dead_code)] #[trace] pub data: PrivateData };
-        assert!(has_trace_attr(&field));
+        // Field with #[jsg_trace] alongside another attr — still detected.
+        let field: syn::Field =
+            parse_quote! { #[allow(dead_code)] #[jsg_trace] pub data: PrivateData };
+        assert!(has_jsg_trace_attr(&field));
     }
 }

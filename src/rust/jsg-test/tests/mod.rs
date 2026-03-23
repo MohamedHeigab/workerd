@@ -13,4 +13,5 @@ mod local_cast;
 mod non_coercible;
 mod resource_callback;
 mod resource_conversion;
+mod traceable_gc;
 mod unwrap;

@@ -203,19 +203,20 @@ after construction, because `GarbageCollected::trace` receives `&self`.
 > **Note:** Nesting is not recursive. `Option<Vec<jsg::Rc<T>>>` is **not** automatically
 > traced — only one level of wrapping around the traceable is supported (e.g. `Option<jsg::Rc<T>>`
 > or `Vec<jsg::Rc<T>>`, but not `Option<Vec<jsg::Rc<T>>>`). For such cases use
-> `#[trace]` delegation or `custom_trace` (see below).
+> `#[jsg_trace]` delegation or `custom_trace` (see below).
 
-### Delegating to a nested struct with `#[trace]`
+### Delegating to a nested type with `#[jsg_trace]`
 
-To mirror the C++ `PrivateData::visitForGc` pattern, annotate a field with `#[trace]`.
-The macro emits `jsg::GarbageCollected::trace(&self.field, visitor)` for that field.
-The field's type must implement `GarbageCollected` — enforced at compile time.
+Annotate a field with `#[jsg_trace]` to delegate tracing to it. The macro emits
+`jsg::GarbageCollected::trace(&self.field, visitor)` — the field's type must implement
+`GarbageCollected`, enforced at compile time. `#[jsg_trace]` is stripped from the
+emitted struct definition so the compiler never sees it as an unknown attribute.
 
-The `#[trace]` attribute is stripped from the emitted struct definition, so the
-compiler never sees it as an unknown attribute.
+The field type can implement `GarbageCollected` in two ways:
+
+**Manually** (for complex logic):
 
 ```rust
-/// Plain Rust struct (not a resource) that holds traceable handles.
 struct EventHandlers {
     on_message: Option<jsg::v8::Global<jsg::v8::Value>>,
     on_error:   Option<jsg::v8::Global<jsg::v8::Value>>,
@@ -231,9 +232,26 @@ impl jsg::GarbageCollected for EventHandlers {
 
 #[jsg_resource]
 pub struct MySocket {
-    #[trace]               // ← emits: EventHandlers::trace(&self.handlers, visitor)
+    #[jsg_trace]
     handlers: EventHandlers,
-    name: String,          // plain data — ignored
+    name: String,
+}
+```
+
+**Via `#[jsg_traceable]`** (auto-generated, see below):
+
+```rust
+#[jsg_traceable]
+struct EventHandlers {
+    on_message: Option<jsg::v8::Global<jsg::v8::Value>>,
+    on_error:   Option<jsg::v8::Global<jsg::v8::Value>>,
+}
+
+#[jsg_resource]
+pub struct MySocket {
+    #[jsg_trace]
+    handlers: EventHandlers,
+    name: String,
 }
 ```
 
@@ -272,7 +290,7 @@ which closes over its own JS wrapper) to be detected and collected on the next f
 
 ### Custom tracing with `custom_trace`
 
-For cases where `#[trace]` delegation is not enough, use
+For cases where `#[jsg_trace]` delegation is not enough, use
 `#[jsg_resource(custom_trace)]` to suppress the generated `GarbageCollected` impl
 and write your own. The macro still generates `jsg::Type`, `jsg::ToJS`, and
 `jsg::FromJS` — only the GC impl is omitted.
@@ -296,3 +314,82 @@ impl jsg::GarbageCollected for DynamicResource {
 ```
 
 `custom_trace` can be combined with `name`: `#[jsg_resource(name = "MyName", custom_trace)]`.
+
+---
+
+## `#[jsg_traceable]`
+
+Generates `GarbageCollected` for a plain struct or enum that is not itself a
+JavaScript resource but holds GC-visible handles. The type can then be used as a
+`#[jsg_trace]` field inside a `#[jsg_resource]`.
+
+### Plain struct
+
+Equivalent to writing `GarbageCollected` by hand, but using the same automatic
+field classifier as `#[jsg_resource]`. All field shapes from the
+[Supported field shapes](#supported-field-shapes) table are recognised.
+
+```rust
+#[jsg_traceable]
+struct Callbacks {
+    pub on_data:  jsg::Rc<DataHandler>,
+    pub on_error: Option<jsg::Rc<ErrorHandler>>,
+}
+
+#[jsg_resource]
+pub struct EventSource {
+    #[jsg_trace]
+    callbacks: Callbacks,
+}
+```
+
+### Enum — the `kj::OneOf` state-machine pattern
+
+Each variant gets one `match` arm. Fields within the arm are classified with the
+same cascade as struct fields:
+
+| Variant kind | Generated arm |
+|---|---|
+| Unit (`Closed`) | `Self::Closed => {}` — no-op |
+| Named fields (`Errored { reason: jsg::Rc<T> }`) | binds traceable fields by name, traces each |
+| Tuple (`Readable(jsg::Rc<T>)`) | binds positionally as `_f0`, `_f1`, …, traces each |
+
+```rust
+#[jsg_traceable]
+enum StreamState {
+    Closed,                                     // unit — no-op arm
+    Errored { reason: jsg::Rc<ErrorObject> },   // traces reason
+    Readable(jsg::Rc<ReadableImpl>),            // traces _f0
+}
+
+#[jsg_resource]
+pub struct ReadableStream {
+    #[jsg_trace]
+    state: StreamState,
+    name: String,
+}
+```
+
+### Nested `#[jsg_traceable]` types
+
+`#[jsg_trace]` works inside `#[jsg_traceable]` too, enabling multi-level
+delegation:
+
+```rust
+#[jsg_traceable]
+enum InnerState { Empty, Loaded(jsg::Rc<Data>) }
+
+#[jsg_traceable]
+struct Outer {
+    #[jsg_trace]  // delegates to InnerState::trace
+    inner: InnerState,
+}
+
+#[jsg_resource]
+pub struct Controller {
+    #[jsg_trace]  // delegates to Outer::trace → InnerState::trace → visit_rc
+    helper: Outer,
+}
+```
+
+Override `memory_name()` with `#[jsg_traceable(name = "CustomName")]`.

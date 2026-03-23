@@ -45,10 +45,10 @@ pub fn generate_resource_struct(attr: TokenStream, mut input: syn::DeriveInput) 
     let trace_statements = generate_trace_statements(&fields);
     let name_str = name.to_string();
 
-    // Strip `#[trace]` attributes from field definitions before emitting the struct.
-    // `#[trace]` is a jsg-macros-internal marker; leaving it in the output would cause
+    // Strip `#[jsg_trace]` attributes from field definitions before emitting the struct.
+    // `#[jsg_trace]` is a jsg-macros-internal marker; leaving it in the output would cause
     // the compiler to reject it as an unknown attribute on a struct field.
-    strip_trace_attrs(&mut input);
+    strip_jsg_trace_attrs(&mut input);
 
     let gc_impl = if custom_trace {
         // `custom_trace` suppresses the generated impl — the user will write their own.
@@ -116,17 +116,17 @@ pub fn generate_resource_struct(attr: TokenStream, mut input: syn::DeriveInput) 
     .into()
 }
 
-/// Removes `#[trace]` attributes from all named fields in a `DeriveInput`.
+/// Removes `#[jsg_trace]` attributes from all named fields in a `DeriveInput`.
 ///
-/// `#[trace]` is consumed by the jsg-macros proc macro during trace statement
+/// `#[jsg_trace]` is consumed by the jsg-macros proc macro during trace statement
 /// generation. It must not appear in the final emitted struct definition —
 /// the compiler would reject it as an unrecognised attribute.
-fn strip_trace_attrs(input: &mut syn::DeriveInput) {
+fn strip_jsg_trace_attrs(input: &mut syn::DeriveInput) {
     if let syn::Data::Struct(ref mut data) = input.data
         && let syn::Fields::Named(ref mut fields) = data.fields
     {
         for field in &mut fields.named {
-            field.attrs.retain(|a| !a.path().is_ident("trace"));
+            field.attrs.retain(|a| !a.path().is_ident("jsg_trace"));
         }
     }
 }
