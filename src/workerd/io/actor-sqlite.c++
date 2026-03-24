@@ -7,7 +7,6 @@
 #include "io-gate.h"
 
 #include <workerd/jsg/exception.h>
-#include <workerd/util/autogate.h>
 #include <workerd/util/sentry.h>
 
 #include <kj/exception.h>
@@ -393,7 +392,7 @@ ActorSqlite::PrecommitAlarmState ActorSqlite::startPrecommitAlarmScheduling() {
     // we commit to local SQLite.
     //
     // By waiting on any pending "move later" alarm, we correctly serialize our `scheduleRun()`
-    // calls to the alarm scheduler.
+    // calls to the alarm manager.
     state.schedulingPromise =
         requestScheduledAlarm(metadata.getAlarm(), alarmLaterChain.addBranch());
   }
@@ -1004,6 +1003,25 @@ void ActorSqlite::cancelDeferredAlarmDeletion() {
     LOG_WARNING_ONCE("expected to be in alarm handler when trying to cancel deleted alarm");
   }
   haveDeferredDelete = false;
+}
+
+kj::Promise<void> ActorSqlite::abandonAlarm(kj::Date scheduledTime) {
+  // Called when AlarmManager has given up retrying an alarm after too many counted failures.
+  // Clear the alarm from SQLite so getAlarm() returns null instead of a stale time.
+  // Only clear if SQLite currently has the exact alarm being abandoned and we're not mid-handler.
+  // The time check guards against the race where the user set a new alarm (which always has a
+  // time >= now() > scheduledTime due to past-time clamping in setAlarm) before this call arrived.
+  if (inAlarmHandler) {
+    // Shouldn't happen -- AlarmManager shouldn't call abandonAlarm while a handler is running.
+    LOG_WARNING_ONCE("abandonAlarm called while alarm handler is still running");
+    return kj::READY_NOW;
+  }
+  KJ_IF_SOME(storedTime, metadata.getAlarm()) {
+    if (storedTime == scheduledTime) {
+      setAlarm(kj::none, {}, nullptr);
+    }
+  }
+  return kj::READY_NOW;
 }
 
 kj::Maybe<kj::Promise<void>> ActorSqlite::onNoPendingFlush(SpanParent parentSpan) {
