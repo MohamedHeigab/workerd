@@ -576,9 +576,6 @@ class Worker::Isolate: public kj::AtomicRefcounted {
 
   size_t nextRequestId = 0;
   kj::Own<jsg::AsyncContextFrame::StorageKey> traceAsyncContextKey;
-  // Stores the current user-facing SpanParent in the async context frame so that
-  // user spans nest correctly under startActiveSpan() without needing to thread
-  // parent references manually through every call site.
   kj::Own<jsg::AsyncContextFrame::StorageKey> userTraceAsyncContextKey;
 
   friend class Worker;
@@ -776,7 +773,7 @@ class Worker::Lock {
 
   // Get the opaque storage key to use for recording trace information in async contexts.
   jsg::AsyncContextFrame::StorageKey& getTraceAsyncContextKey();
-  // Get the storage key for the current user-facing SpanParent in the async context frame.
+  // Get the opaque storage key to use for recording user trace information in async contexts.
   jsg::AsyncContextFrame::StorageKey& getUserTraceAsyncContextKey();
 
 

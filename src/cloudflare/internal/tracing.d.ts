@@ -9,5 +9,4 @@ export class Span {
   end(): void;
 }
 
-// Creates a new tracing span with the given name.
 function startSpan(name: string): Span;

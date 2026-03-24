@@ -6,9 +6,6 @@
 
 namespace workerd::api {
 
-// ---------------------------------------------------------------------------
-// JsSpan
-
 JsSpan::JsSpan(kj::Maybe<IoOwn<TraceContext>> span): span(kj::mv(span)) {}
 
 JsSpan::~JsSpan() noexcept(false) {
@@ -30,9 +27,6 @@ void JsSpan::setAttribute(
   }
 }
 
-// ---------------------------------------------------------------------------
-// TracingModule
-
 jsg::Ref<JsSpan> TracingModule::startSpan(jsg::Lock& js, kj::String name) {
   KJ_IF_SOME(ioContext, IoContext::tryCurrent()) {
     TraceContext traceContext = ioContext.makeUserTraceSpan(kj::ConstString(kj::mv(name)));
@@ -43,6 +37,5 @@ jsg::Ref<JsSpan> TracingModule::startSpan(jsg::Lock& js, kj::String name) {
     return js.alloc<JsSpan>(kj::none);
   }
 }
-
 
 }  // namespace workerd::api
