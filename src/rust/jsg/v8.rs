@@ -13,6 +13,8 @@
 //!   ensure the isolate is alive and the current thread holds the isolate lock
 //! - [`Local<'a, T>`] - Stack-allocated handle to a V8 value, tied to a `HandleScope`
 //! - [`Global<T>`] - Persistent handle that outlives `HandleScope`s
+//! - [`BackingStore`] - Owned handle to the raw memory backing an `ArrayBuffer`;
+//!   keeps the memory alive independently of any JS handle
 //!
 //! # Garbage Collection
 //!
@@ -31,6 +33,7 @@ use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -84,6 +87,14 @@ pub mod ffi {
         ptr: usize,
     }
 
+    /// Mirrors `v8::BackingStoreInitializationMode`. Must be kept in sync with
+    /// the V8-defined enum in `v8-array-buffer.h`.
+    #[derive(Debug, PartialEq, Eq, Copy, Clone)]
+    pub enum BackingStoreInitializationMode {
+        ZeroInitialized = 0,
+        Uninitialized = 1,
+    }
+
     #[derive(Debug, PartialEq, Eq, Copy, Clone)]
     pub enum ExceptionType {
         OperationError,
@@ -126,6 +137,18 @@ pub mod ffi {
         type Isolate;
         type FunctionCallbackInfo;
         type Wrappable;
+
+        // BackingStore
+        pub unsafe fn backing_store_drop(store: usize);
+        pub unsafe fn backing_store_data(store: usize) -> *mut u8;
+        pub unsafe fn backing_store_byte_length(store: usize) -> usize;
+        pub unsafe fn backing_store_max_byte_length(store: usize) -> usize;
+        pub unsafe fn backing_store_is_shared(store: usize) -> bool;
+        pub unsafe fn backing_store_is_resizable_by_user_javascript(store: usize) -> bool;
+        pub unsafe fn backing_store_new_resizable(
+            byte_length: usize,
+            max_byte_length: usize,
+        ) -> usize;
 
         // Local<T>
         pub unsafe fn local_drop(value: Local);
@@ -188,6 +211,58 @@ pub mod ffi {
             data: *const u64,
             length: usize,
         ) -> Local;
+        pub unsafe fn local_new_array_buffer(
+            isolate: *mut Isolate,
+            data: *const u8,
+            length: usize,
+        ) -> Local;
+        pub unsafe fn local_new_array_buffer_empty(
+            isolate: *mut Isolate,
+            byte_length: usize,
+        ) -> Local;
+        pub unsafe fn array_buffer_new_with_mode(
+            isolate: *mut Isolate,
+            byte_length: usize,
+            mode: BackingStoreInitializationMode,
+        ) -> KjMaybe<Local>;
+        pub unsafe fn array_buffer_from_backing_store(isolate: *mut Isolate, store: usize)
+        -> Local;
+        pub unsafe fn local_array_buffer_byte_length(
+            isolate: *mut Isolate,
+            buffer: &Local,
+        ) -> usize;
+        pub unsafe fn local_array_buffer_data(isolate: *mut Isolate, buffer: &Local) -> *mut u8;
+        pub unsafe fn local_array_buffer_get_backing_store(
+            isolate: *mut Isolate,
+            buffer: &Local,
+        ) -> usize;
+
+        // Local<ArrayBufferView>
+        pub unsafe fn local_array_buffer_view_byte_offset(
+            isolate: *mut Isolate,
+            view: &Local,
+        ) -> usize;
+        pub unsafe fn local_array_buffer_view_byte_length(
+            isolate: *mut Isolate,
+            view: &Local,
+        ) -> usize;
+        pub unsafe fn local_array_buffer_view_buffer_data(
+            isolate: *mut Isolate,
+            view: &Local,
+        ) -> *mut u8;
+        pub unsafe fn local_array_buffer_view_get_buffer(
+            isolate: *mut Isolate,
+            view: &Local,
+        ) -> Local;
+        pub unsafe fn local_array_buffer_view_element_size(
+            isolate: *mut Isolate,
+            view: &Local,
+        ) -> usize;
+        pub unsafe fn local_array_buffer_view_is_integer_type(
+            isolate: *mut Isolate,
+            view: &Local,
+        ) -> bool;
+
         pub unsafe fn local_eq(lhs: &Local, rhs: &Local) -> bool;
         pub unsafe fn local_has_value(value: &Local) -> bool;
         pub unsafe fn local_is_string(value: &Local) -> bool;
@@ -213,6 +288,7 @@ pub mod ffi {
         pub unsafe fn local_is_uint8clamped_array(value: &Local) -> bool;
         pub unsafe fn local_is_array_buffer(value: &Local) -> bool;
         pub unsafe fn local_is_array_buffer_view(value: &Local) -> bool;
+        pub unsafe fn local_is_shared_array_buffer(value: &Local) -> bool;
         pub unsafe fn local_is_function(value: &Local) -> bool;
         pub unsafe fn local_is_symbol(value: &Local) -> bool;
         pub unsafe fn local_is_name(value: &Local) -> bool;
@@ -443,6 +519,20 @@ pub mod ffi {
         pub unsafe fn unwrap_float64_array(isolate: *mut Isolate, value: Local) -> Vec<f64>;
         pub unsafe fn unwrap_bigint64_array(isolate: *mut Isolate, value: Local) -> Vec<i64>;
         pub unsafe fn unwrap_biguint64_array(isolate: *mut Isolate, value: Local) -> Vec<u64>;
+
+        // ArrayBuffer detach/detachable/was-detached
+        pub unsafe fn local_array_buffer_detach(isolate: *mut Isolate, buffer: &mut Local);
+        pub unsafe fn local_array_buffer_was_detached(
+            isolate: *mut Isolate,
+            buffer: &Local,
+        ) -> bool;
+        pub unsafe fn local_array_buffer_is_detachable(
+            isolate: *mut Isolate,
+            buffer: &Local,
+        ) -> bool;
+
+        // Value-level shared check
+        pub fn local_array_buffer_is_shared(value: &Local) -> bool;
 
         // FunctionCallbackInfo
         pub unsafe fn fci_get_isolate(args: *mut FunctionCallbackInfo) -> *mut Isolate;
@@ -847,6 +937,146 @@ pub struct Float64Array;
 pub struct BigInt64Array;
 pub struct BigUint64Array;
 pub struct Uint8ClampedArray;
+pub struct ArrayBuffer;
+pub struct ArrayBufferView;
+
+// =============================================================================
+// `BackingStore` — owned handle to a heap-allocated `std::shared_ptr<v8::BackingStore>`
+// =============================================================================
+
+/// Owned handle to a `v8::BackingStore`.
+///
+/// A `BackingStore` is the raw memory region that backs an `ArrayBuffer` or
+/// `SharedArrayBuffer`. Internally this type holds a raw pointer to a
+/// heap-allocated `std::shared_ptr<v8::BackingStore>`, keeping the underlying
+/// memory alive even after the original JS buffer handle goes out of scope.
+///
+/// Obtained via [`Local<ArrayBuffer>::backing_store()`].
+pub struct BackingStore {
+    /// Non-zero `usize` encoding the address of a heap-allocated
+    /// `std::shared_ptr<v8::BackingStore>`. Using `usize` matches the CXX FFI
+    /// convention of representing opaque pointers as `size_t`.
+    /// Freed by `ffi::backing_store_drop` on `Drop`.
+    ptr: NonZeroUsize,
+}
+
+impl Drop for BackingStore {
+    fn drop(&mut self) {
+        // SAFETY: ptr was obtained from a `local_*_get_backing_store` FFI call
+        // and is uniquely owned by self.
+        unsafe { ffi::backing_store_drop(self.ptr.get()) }
+    }
+}
+
+impl BackingStore {
+    /// Creates a new resizable `BackingStore` with an initial `byte_length` and a
+    /// maximum capacity of `max_byte_length`.
+    ///
+    /// The resulting `BackingStore` can be passed to [`ArrayBuffer::from_backing_store`]
+    /// to create a resizable `ArrayBuffer`.
+    pub fn new_resizable(byte_length: usize, max_byte_length: usize) -> Self {
+        // SAFETY: V8 guarantees a non-null result or crashes on OOM.
+        let ptr = unsafe { ffi::backing_store_new_resizable(byte_length, max_byte_length) };
+        // SAFETY: ptr is a freshly allocated shared_ptr, uniquely owned.
+        unsafe { Self::from_raw(ptr) }
+    }
+
+    /// Wraps a `usize` address returned by a `local_*_get_backing_store` FFI call.
+    ///
+    /// # Safety
+    /// `ptr` must be a non-zero value returned by one of the
+    /// `local_*_get_backing_store` FFI functions, and the caller must transfer
+    /// unique ownership to this `BackingStore`.
+    unsafe fn from_raw(ptr: usize) -> Self {
+        Self {
+            ptr: NonZeroUsize::new(ptr).expect("backing_store pointer must be non-null"),
+        }
+    }
+
+    /// Returns a raw pointer to the backing store's data.
+    ///
+    /// Valid for the lifetime of this `BackingStore`.
+    /// May be null for zero-byte buffers.
+    #[inline]
+    pub fn data(&self) -> *mut u8 {
+        // SAFETY: ptr is a valid heap-allocated shared_ptr owned by self.
+        unsafe { ffi::backing_store_data(self.ptr.get()) }
+    }
+
+    /// Returns the current byte length of the backing store.
+    #[inline]
+    pub fn byte_length(&self) -> usize {
+        // SAFETY: ptr is valid and owned by self.
+        unsafe { ffi::backing_store_byte_length(self.ptr.get()) }
+    }
+
+    /// Returns the maximum byte length.
+    ///
+    /// For resizable `ArrayBuffer`s this is `>= byte_length()`. For fixed-size
+    /// buffers it equals `byte_length()`.
+    #[inline]
+    pub fn max_byte_length(&self) -> usize {
+        // SAFETY: ptr is valid and owned by self.
+        unsafe { ffi::backing_store_max_byte_length(self.ptr.get()) }
+    }
+
+    /// Returns `true` if this backing store was created for a `SharedArrayBuffer`.
+    #[inline]
+    pub fn is_shared(&self) -> bool {
+        // SAFETY: ptr is valid and owned by self.
+        unsafe { ffi::backing_store_is_shared(self.ptr.get()) }
+    }
+
+    /// Returns `true` if user JavaScript code may resize this buffer.
+    #[inline]
+    pub fn is_resizable_by_user_javascript(&self) -> bool {
+        // SAFETY: ptr is valid and owned by self.
+        unsafe { ffi::backing_store_is_resizable_by_user_javascript(self.ptr.get()) }
+    }
+
+    /// Returns `true` if the backing store has zero bytes.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.byte_length() == 0
+    }
+
+    /// Returns a shared byte slice into the backing store data.
+    ///
+    /// Requires `&mut Lock` so that no JavaScript can execute while the slice
+    /// is live — JS could otherwise modify the buffer through a `TypedArray`
+    /// view, violating the immutability of `&[u8]`.
+    ///
+    /// # Safety
+    /// For shared backing stores (`is_shared() == true`), other agents may
+    /// concurrently write to this memory. The caller must ensure no concurrent
+    /// writes occur for the duration of the borrow.
+    #[inline]
+    pub unsafe fn as_slice(&self, _lock: &mut crate::Lock) -> &[u8] {
+        if self.is_empty() {
+            return &[];
+        }
+        // SAFETY: data() is non-null for non-empty stores; byte_length() bytes are valid.
+        unsafe { std::slice::from_raw_parts(self.data().cast_const(), self.byte_length()) }
+    }
+
+    /// Returns a mutable byte slice into the backing store data.
+    ///
+    /// Requires `&mut Lock` so that no JavaScript can execute while the mutable
+    /// slice is live — the borrow on the lock prevents calling `eval`, invoking
+    /// functions, or any other operation that could modify or detach the buffer.
+    ///
+    /// # Safety
+    /// The caller must ensure no other live reference (shared or mutable) to
+    /// this memory region exists for the duration of the borrow.
+    #[inline]
+    pub unsafe fn as_mut_slice(&mut self, _lock: &mut crate::Lock) -> &mut [u8] {
+        if self.is_empty() {
+            return &mut [];
+        }
+        // SAFETY: data() is non-null for non-empty stores; byte_length() bytes are valid.
+        unsafe { std::slice::from_raw_parts_mut(self.data(), self.byte_length()) }
+    }
+}
 
 // Generic Local<'a, T> handle with lifetime
 #[derive(Debug)]
@@ -1060,10 +1290,17 @@ impl<'a, T> Local<'a, T> {
         unsafe { ffi::local_is_array_buffer(&self.handle) }
     }
 
-    /// Returns true if the value is an `ArrayBufferView`.
+    /// Returns true if the value is an `ArrayBufferView`
+    /// (i.e. any `TypedArray` or `DataView`).
     pub fn is_array_buffer_view(&self) -> bool {
         // SAFETY: handle is valid within the current HandleScope.
         unsafe { ffi::local_is_array_buffer_view(&self.handle) }
+    }
+
+    /// Returns true if the value is a `SharedArrayBuffer`.
+    pub fn is_shared_array_buffer(&self) -> bool {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_is_shared_array_buffer(&self.handle) }
     }
 
     /// Returns true if the value is a JavaScript function.
@@ -1146,6 +1383,8 @@ impl_as!(Array, is_array);
 impl_as!(String, is_string);
 impl_as!(Symbol, is_symbol);
 impl_as!(Name, is_name);
+impl_as!(ArrayBuffer, is_array_buffer);
+impl_as!(ArrayBufferView, is_array_buffer_view);
 
 // Value-specific implementations
 impl<'a> Local<'a, Value> {
@@ -1298,14 +1537,37 @@ impl_local_cast!(Function -> Object, is_function);
 impl_local_cast!(Array -> Object, is_array);
 impl_local_cast!(TypedArray -> Object, is_array_buffer_view);
 
-impl Local<'_, Array> {
+// ArrayBuffer <-> Value, ArrayBuffer <-> Object
+impl_local_cast!(ArrayBuffer -> Value, is_array_buffer);
+impl_local_cast!(ArrayBuffer -> Object, is_array_buffer);
+
+// ArrayBufferView <-> Value, ArrayBufferView <-> Object
+// All concrete TypedArray types and DataView are ArrayBufferViews.
+impl_local_cast!(ArrayBufferView -> Value, is_array_buffer_view);
+impl_local_cast!(ArrayBufferView -> Object, is_array_buffer_view);
+
+// Concrete typed arrays <-> ArrayBufferView base
+impl_local_cast!(Uint8Array -> ArrayBufferView, is_uint8_array);
+impl_local_cast!(Uint16Array -> ArrayBufferView, is_uint16_array);
+impl_local_cast!(Uint32Array -> ArrayBufferView, is_uint32_array);
+impl_local_cast!(Int8Array -> ArrayBufferView, is_int8_array);
+impl_local_cast!(Int16Array -> ArrayBufferView, is_int16_array);
+impl_local_cast!(Int32Array -> ArrayBufferView, is_int32_array);
+impl_local_cast!(Float32Array -> ArrayBufferView, is_float32_array);
+impl_local_cast!(Float64Array -> ArrayBufferView, is_float64_array);
+impl_local_cast!(BigInt64Array -> ArrayBufferView, is_bigint64_array);
+impl_local_cast!(BigUint64Array -> ArrayBufferView, is_biguint64_array);
+
+impl Array {
     /// Creates a new JavaScript array with the given length.
-    pub fn new<'a>(lock: &mut crate::Lock, len: usize) -> Local<'a, Array> {
+    pub fn new<'a>(lock: &mut crate::Lock, len: usize) -> Local<'a, Self> {
         let isolate = lock.isolate();
         // SAFETY: isolate is valid and locked (guaranteed by Lock).
         unsafe { Local::from_ffi(isolate, ffi::local_new_array(isolate.as_ffi(), len)) }
     }
+}
 
+impl Local<'_, Array> {
     /// Returns the length of the array.
     #[inline]
     pub fn len(&self) -> usize {
@@ -1341,6 +1603,305 @@ impl Local<'_, Array> {
             // SAFETY: each Global handle was created by the C++ side and is valid.
             .map(|g| unsafe { Global::from_ffi(g) })
             .collect()
+    }
+}
+
+// =============================================================================
+// `ArrayBuffer`-specific implementations
+// =============================================================================
+
+impl ArrayBuffer {
+    /// Creates a new `ArrayBuffer` by copying `data`.
+    pub fn new<'a>(lock: &mut crate::Lock, data: &[u8]) -> Local<'a, Self> {
+        let isolate = lock.isolate();
+        // SAFETY: Lock guarantees the isolate is locked and a HandleScope is active.
+        unsafe {
+            Local::from_ffi(
+                isolate,
+                ffi::local_new_array_buffer(isolate.as_ffi(), data.as_ptr(), data.len()),
+            )
+        }
+    }
+
+    /// Attempts to create a new `ArrayBuffer` with `byte_length` bytes using
+    /// the given initialization mode (zeroed or uninitialized).
+    ///
+    /// Returns `None` if allocation fails.
+    pub fn new_with_mode<'a>(
+        lock: &mut crate::Lock,
+        byte_length: usize,
+        mode: ffi::BackingStoreInitializationMode,
+    ) -> Option<Local<'a, Self>> {
+        let isolate = lock.isolate();
+        // SAFETY: Lock guarantees the isolate is locked and a HandleScope is active.
+        let opt: Option<ffi::Local> =
+            unsafe { ffi::array_buffer_new_with_mode(isolate.as_ffi(), byte_length, mode) }.into();
+        // SAFETY: isolate is valid and locked; local is a valid handle from V8.
+        opt.map(|local| unsafe { Local::from_ffi(isolate, local) })
+    }
+
+    /// Wraps an existing `BackingStore` in a new `ArrayBuffer`.
+    ///
+    /// The `ArrayBuffer` shares ownership of the backing store's memory via the
+    /// underlying `shared_ptr` reference count.
+    // The BackingStore is taken by value to express ownership transfer; the
+    // C++ ArrayBuffer::New copies the shared_ptr so both sides hold a reference.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "ownership transfer semantics"
+    )]
+    pub fn from_backing_store<'a>(lock: &mut crate::Lock, store: BackingStore) -> Local<'a, Self> {
+        let isolate = lock.isolate();
+        // SAFETY: Lock guarantees the isolate is locked and a HandleScope is active.
+        // store.ptr is a valid heap-allocated shared_ptr; we pass it by raw pointer
+        // so the C++ side can copy the shared_ptr (incrementing refcount).
+        unsafe {
+            Local::from_ffi(
+                isolate,
+                ffi::array_buffer_from_backing_store(isolate.as_ffi(), store.ptr.get()),
+            )
+        }
+    }
+
+    /// Creates a new zero-initialized `ArrayBuffer` with the given byte length.
+    pub fn new_zeroed<'a>(lock: &mut crate::Lock, byte_length: usize) -> Local<'a, Self> {
+        let isolate = lock.isolate();
+        // SAFETY: Lock guarantees the isolate is locked and a HandleScope is active.
+        unsafe {
+            Local::from_ffi(
+                isolate,
+                ffi::local_new_array_buffer_empty(isolate.as_ffi(), byte_length),
+            )
+        }
+    }
+}
+
+impl Local<'_, ArrayBuffer> {
+    /// Returns the byte length of this `ArrayBuffer`.
+    #[inline]
+    pub fn byte_length(&self) -> usize {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_byte_length(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns `true` if this `ArrayBuffer` has zero bytes.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.byte_length() == 0
+    }
+
+    /// Returns a raw pointer to the backing store data.
+    ///
+    /// # Safety
+    /// The pointer is valid only while the backing store is alive (i.e. while this
+    /// `Local` handle — or another handle to the same buffer — remains in scope).
+    #[inline]
+    pub unsafe fn data(&self) -> *mut u8 {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_data(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns a shared byte slice view into the `ArrayBuffer`'s backing store.
+    ///
+    /// Zero-copy: the slice points directly into V8-managed memory.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        if self.is_empty() {
+            return &[];
+        }
+        // SAFETY: data() is non-null for non-empty buffers; byte_length() bytes are valid.
+        unsafe { std::slice::from_raw_parts(self.data().cast_const(), self.byte_length()) }
+    }
+
+    /// Returns a mutable byte slice view into the `ArrayBuffer`'s backing store.
+    ///
+    /// Zero-copy: points directly into V8-managed memory.
+    ///
+    /// Requires `&mut Lock` so that no JavaScript can execute while the mutable
+    /// slice is live — the borrow on the lock prevents calling `eval`, invoking
+    /// functions, or any other operation that could modify or detach the buffer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that no other live reference (shared or mutable)
+    /// into the same `ArrayBuffer` region exists for the duration of the returned
+    /// slice. `&mut self` prevents aliasing through *this* `Local` handle, but
+    /// two distinct `Local` handles may back the same buffer — the caller is
+    /// responsible for ensuring exclusivity.
+    #[inline]
+    pub unsafe fn as_mut_slice(&mut self, _lock: &mut crate::Lock) -> &mut [u8] {
+        if self.is_empty() {
+            return &mut [];
+        }
+        // SAFETY: caller guarantees exclusive access; data() is non-null for
+        // non-empty buffers; byte_length() bytes are valid.
+        unsafe { std::slice::from_raw_parts_mut(self.data(), self.byte_length()) }
+    }
+
+    /// Copies the `ArrayBuffer` contents into a new `Vec<u8>`.
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.as_slice().to_vec()
+    }
+
+    /// Detaches this `ArrayBuffer`, setting its byte length to zero.
+    ///
+    /// After detaching, the buffer's data is no longer accessible from JS.
+    /// Typed array views backed by this buffer also become zero-length.
+    pub fn detach(&mut self) {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_detach(self.isolate.as_ffi(), &mut self.handle) }
+    }
+
+    /// Returns `true` if this `ArrayBuffer` has been detached.
+    pub fn was_detached(&self) -> bool {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_was_detached(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns `true` if this `ArrayBuffer` can be detached.
+    pub fn is_detachable(&self) -> bool {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_is_detachable(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns `true` if the underlying V8 value is a `SharedArrayBuffer`.
+    ///
+    /// This performs a value-level check, allowing code that receives a
+    /// `Local<ArrayBuffer>` via cast to distinguish shared buffers.
+    pub fn is_shared(&self) -> bool {
+        ffi::local_array_buffer_is_shared(&self.handle)
+    }
+
+    /// Returns the `BackingStore` for this `ArrayBuffer`.
+    ///
+    /// The returned `BackingStore` keeps the underlying memory alive independently
+    /// of this `Local` handle.
+    pub fn backing_store(&self) -> BackingStore {
+        // SAFETY: handle is valid within the current HandleScope; the returned pointer
+        // is a freshly heap-allocated shared_ptr that we uniquely own.
+        let ptr = unsafe {
+            ffi::local_array_buffer_get_backing_store(self.isolate.as_ffi(), &self.handle)
+        };
+        // SAFETY: the FFI guarantees a non-null pointer on success.
+        unsafe { BackingStore::from_raw(ptr) }
+    }
+}
+
+// =============================================================================
+// `ArrayBufferView`-specific implementations
+// =============================================================================
+
+impl<'a> Local<'a, ArrayBufferView> {
+    /// Returns the byte offset of this view within its backing `ArrayBuffer`.
+    #[inline]
+    pub fn byte_offset(&self) -> usize {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_view_byte_offset(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns the byte length of this view.
+    #[inline]
+    pub fn byte_length(&self) -> usize {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_view_byte_length(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns `true` if this view covers zero bytes.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.byte_length() == 0
+    }
+
+    /// Returns the size in bytes of a single element for typed arrays.
+    ///
+    /// Returns `0` for `DataView` (which has no fixed element size).
+    /// For example: `1` for `Uint8Array`, `4` for `Float32Array`, `8` for
+    /// `Float64Array`.
+    #[inline]
+    pub fn element_size(&self) -> usize {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_view_element_size(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns `true` if the element type is an integer type.
+    ///
+    /// Returns `false` for `Float32Array`, `Float64Array`, and `DataView`.
+    #[inline]
+    pub fn is_integer_type(&self) -> bool {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_view_is_integer_type(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns a raw pointer to the backing `ArrayBuffer`'s data (without byte offset).
+    ///
+    /// Add `byte_offset()` to reach the first byte of this view's region.
+    ///
+    /// # Safety
+    /// The pointer is valid only while the backing `ArrayBuffer` is alive.
+    #[inline]
+    pub unsafe fn buffer_data(&self) -> *mut u8 {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe { ffi::local_array_buffer_view_buffer_data(self.isolate.as_ffi(), &self.handle) }
+    }
+
+    /// Returns the backing `ArrayBuffer` of this view.
+    pub fn buffer(&self) -> Local<'a, ArrayBuffer> {
+        // SAFETY: handle is valid within the current HandleScope.
+        unsafe {
+            Local::from_ffi(
+                self.isolate,
+                ffi::local_array_buffer_view_get_buffer(self.isolate.as_ffi(), &self.handle),
+            )
+        }
+    }
+
+    /// Returns a shared byte slice of the view's visible region.
+    ///
+    /// Zero-copy: points directly into V8-managed memory.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        if self.is_empty() {
+            return &[];
+        }
+        // SAFETY: buffer_data() + byte_offset() gives the start of the view's region;
+        // byte_length() bytes are valid for the lifetime of this Local.
+        unsafe {
+            let ptr = self.buffer_data().byte_add(self.byte_offset());
+            std::slice::from_raw_parts(ptr.cast_const(), self.byte_length())
+        }
+    }
+
+    /// Returns a mutable byte slice of the view's visible region.
+    ///
+    /// Zero-copy: points directly into V8-managed memory.
+    ///
+    /// Requires `&mut Lock` so that no JavaScript can execute while the mutable
+    /// slice is live — the borrow on the lock prevents calling `eval`, invoking
+    /// functions, or any other operation that could modify or detach the buffer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that no other live reference (shared or mutable)
+    /// into the same buffer region exists for the duration of the returned
+    /// slice. `&mut self` prevents aliasing through *this* handle, but two
+    /// distinct handles backed by the same buffer could alias — the caller is
+    /// responsible for ensuring exclusivity.
+    #[inline]
+    pub unsafe fn as_mut_slice(&mut self, _lock: &mut crate::Lock) -> &mut [u8] {
+        if self.is_empty() {
+            return &mut [];
+        }
+        // SAFETY: caller guarantees exclusive access; same pointer derivation
+        // as as_slice; &mut self prevents aliasing through this handle.
+        unsafe {
+            let ptr = self.buffer_data().byte_add(self.byte_offset());
+            std::slice::from_raw_parts_mut(ptr, self.byte_length())
+        }
+    }
+
+    /// Copies the view's visible byte range into a new `Vec<u8>`.
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.as_slice().to_vec()
     }
 }
 
@@ -1494,17 +2055,20 @@ macro_rules! impl_typed_array {
             /// Zero-copy: points directly into the V8 `ArrayBuffer`'s backing store.
             /// The slice is valid for the lifetime of this `Local` handle.
             ///
+            /// Requires `&mut Lock` so that no JavaScript can execute while the
+            /// mutable slice is live — the borrow on the lock prevents calling
+            /// `eval`, invoking functions, or any other operation that could modify
+            /// or detach the underlying buffer.
+            ///
             /// # Safety
             ///
             /// The caller must ensure that no other live reference (shared or mutable)
             /// into the same `ArrayBuffer` region exists for the duration of the returned
             /// slice. `&mut self` prevents aliasing through *this* `Local` handle, but
             /// two distinct `Local` handles may back the same buffer — the caller is
-            /// responsible for ensuring exclusivity. Additionally, once V8 introduces
-            /// immutable `ArrayBuffer`s, writing to such a buffer via this method would
-            /// be undefined behaviour.
+            /// responsible for ensuring exclusivity.
             #[inline]
-            pub unsafe fn as_mut_slice(&mut self) -> &mut [$elem] {
+            pub unsafe fn as_mut_slice(&mut self, _lock: &mut crate::Lock) -> &mut [$elem] {
                 if self.is_empty() {
                     return &mut [];
                 }
@@ -1685,6 +2249,8 @@ impl_typed_array_from_js!(
     is_uint8clamped_array,
     "Uint8ClampedArray"
 );
+impl_typed_array_from_js!(ArrayBuffer, is_array_buffer, "ArrayBuffer");
+impl_typed_array_from_js!(ArrayBufferView, is_array_buffer_view, "ArrayBufferView");
 
 impl_typed_array!(Uint8Array, u8, local_uint8_array_get);
 impl_typed_array!(Uint16Array, u16, local_uint16_array_get);

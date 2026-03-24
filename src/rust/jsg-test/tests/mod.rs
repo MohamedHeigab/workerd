@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 mod arrays;
+mod buffer_types;
 mod eval;
 mod function;
 mod gc;

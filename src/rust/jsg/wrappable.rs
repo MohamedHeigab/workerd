@@ -380,7 +380,7 @@ impl<T: ToJS> ToJS for Vec<T> {
     where
         'b: 'a,
     {
-        let mut array = v8::Local::<v8::Array>::new(lock, self.len());
+        let mut array = v8::Array::new(lock, self.len());
         for (i, item) in self.into_iter().enumerate() {
             array.set(i, item.to_js(lock));
         }
@@ -569,3 +569,29 @@ impl_typed_array!(
     local_new_biguint64_array,
     unwrap_biguint64_array
 );
+
+// =============================================================================
+// ArrayBuffer, ArrayBufferView, SharedArrayBuffer
+// =============================================================================
+//
+// These three types only implement `Type` (used by `NonCoercible<T>` for type
+// checking).  They do not have element-typed `ToJS`/`FromJS` conversions and
+// do not fit the `impl_typed_array!` macro.
+
+impl Type for v8::ArrayBuffer {
+    fn class_name() -> &'static str {
+        "ArrayBuffer"
+    }
+    fn is_exact(value: &v8::Local<v8::Value>) -> bool {
+        value.is_array_buffer()
+    }
+}
+
+impl Type for v8::ArrayBufferView {
+    fn class_name() -> &'static str {
+        "ArrayBufferView"
+    }
+    fn is_exact(value: &v8::Local<v8::Value>) -> bool {
+        value.is_array_buffer_view()
+    }
+}

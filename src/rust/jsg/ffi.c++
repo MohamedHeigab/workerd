@@ -55,7 +55,8 @@ namespace workerd::rust::jsg {
     return data[index];                                                                            \
   }
 
-// =============================================================================
+// BackingStore — the size_t handle is the address of a heap-allocated
+// std::shared_ptr<v8::BackingStore> allocated with `new`.
 
 // Create an interned V8 string from a Rust identifier name (rust::String or rust::Str).
 // NewFromUtf8 returns an empty MaybeLocal (without scheduling a JS exception) when the
@@ -248,6 +249,10 @@ bool local_is_symbol(const Local& val) {
 
 bool local_is_name(const Local& val) {
   return local_as_ref_from_ffi<v8::Value>(val)->IsName();
+}
+
+bool local_is_shared_array_buffer(const Local& val) {
+  return local_as_ref_from_ffi<v8::Value>(val)->IsSharedArrayBuffer();
 }
 
 ::rust::String local_type_of(Isolate* isolate, const Local& val) {
@@ -454,7 +459,133 @@ void local_array_set(Isolate* isolate, Local& array, uint32_t index, Local value
   ::workerd::jsg::check(v8Array->Set(context, index, local_from_ffi<v8::Value>(kj::mv(value))));
 }
 
+// Local<ArrayBuffer>
+Local local_new_array_buffer(Isolate* isolate, const uint8_t* data, size_t length) {
+  auto backingStore = v8::ArrayBuffer::NewBackingStore(isolate, length);
+  if (length > 0) {
+    memcpy(backingStore->Data(), data, length);
+  }
+  return to_ffi(v8::ArrayBuffer::New(isolate, std::move(backingStore)));
+}
+
+// "empty" means zero-initialized with no source data to copy from, as opposed to
+// local_new_array_buffer which copies caller-supplied bytes into the buffer.
+Local local_new_array_buffer_empty(Isolate* isolate, size_t byte_length) {
+  return to_ffi(v8::ArrayBuffer::New(isolate, byte_length));
+}
+
+kj::Maybe<Local> array_buffer_new_with_mode(
+    Isolate* isolate, size_t byte_length, BackingStoreInitializationMode mode) {
+  auto maybe = v8::ArrayBuffer::MaybeNew(
+      isolate, byte_length, static_cast<v8::BackingStoreInitializationMode>(mode));
+  if (maybe.IsEmpty()) return kj::none;
+  return to_ffi(maybe.ToLocalChecked());
+}
+
+Local array_buffer_from_backing_store(Isolate* isolate, size_t ptr) {
+  return to_ffi(
+      v8::ArrayBuffer::New(isolate, *reinterpret_cast<std::shared_ptr<v8::BackingStore>*>(ptr)));
+}
+
+size_t local_array_buffer_byte_length(Isolate* isolate, const Local& buffer) {
+  return local_as_ref_from_ffi<v8::ArrayBuffer>(buffer)->ByteLength();
+}
+
+uint8_t* local_array_buffer_data(Isolate* isolate, const Local& buffer) {
+  return static_cast<uint8_t*>(local_as_ref_from_ffi<v8::ArrayBuffer>(buffer)->Data());
+}
+
+size_t local_array_buffer_get_backing_store(Isolate* isolate, const Local& buffer) {
+  return reinterpret_cast<size_t>(new std::shared_ptr<v8::BackingStore>(
+      local_as_ref_from_ffi<v8::ArrayBuffer>(buffer)->GetBackingStore()));
+}
+
+// Local<ArrayBufferView>
+size_t local_array_buffer_view_byte_offset(Isolate* isolate, const Local& view) {
+  return local_as_ref_from_ffi<v8::ArrayBufferView>(view)->ByteOffset();
+}
+
+size_t local_array_buffer_view_byte_length(Isolate* isolate, const Local& view) {
+  return local_as_ref_from_ffi<v8::ArrayBufferView>(view)->ByteLength();
+}
+
+uint8_t* local_array_buffer_view_buffer_data(Isolate* isolate, const Local& view) {
+  return static_cast<uint8_t*>(local_as_ref_from_ffi<v8::ArrayBufferView>(view)->Buffer()->Data());
+}
+
+Local local_array_buffer_view_get_buffer(Isolate* isolate, const Local& view) {
+  return to_ffi(local_as_ref_from_ffi<v8::ArrayBufferView>(view)->Buffer());
+}
+
+size_t local_array_buffer_view_element_size(Isolate* isolate, const Local& view) {
+  auto& v8Val = local_as_ref_from_ffi<v8::Value>(view);
+  if (v8Val->IsUint8Array() || v8Val->IsInt8Array() || v8Val->IsUint8ClampedArray()) return 1;
+  if (v8Val->IsUint16Array() || v8Val->IsInt16Array()) return 2;
+  if (v8Val->IsUint32Array() || v8Val->IsInt32Array() || v8Val->IsFloat32Array()) return 4;
+  if (v8Val->IsFloat64Array() || v8Val->IsBigInt64Array() || v8Val->IsBigUint64Array()) return 8;
+  return 0;  // DataView — no fixed element size
+}
+
+bool local_array_buffer_view_is_integer_type(Isolate* isolate, const Local& view) {
+  auto& v8Val = local_as_ref_from_ffi<v8::Value>(view);
+  // Float32Array, Float64Array, and DataView are not integer types.
+  return v8Val->IsTypedArray() && !v8Val->IsFloat32Array() && !v8Val->IsFloat64Array();
+}
+
+// BackingStore
+size_t backing_store_new_resizable(size_t byte_length, size_t max_byte_length) {
+  return reinterpret_cast<size_t>(new std::shared_ptr<v8::BackingStore>(
+      v8::ArrayBuffer::NewResizableBackingStore(byte_length, max_byte_length)));
+}
+
+void backing_store_drop(size_t ptr) {
+  delete reinterpret_cast<std::shared_ptr<v8::BackingStore>*>(ptr);
+}
+
+uint8_t* backing_store_data(size_t ptr) {
+  return static_cast<uint8_t*>(
+      reinterpret_cast<std::shared_ptr<v8::BackingStore>*>(ptr)->get()->Data());
+}
+
+size_t backing_store_byte_length(size_t ptr) {
+  return reinterpret_cast<std::shared_ptr<v8::BackingStore>*>(ptr)->get()->ByteLength();
+}
+
+size_t backing_store_max_byte_length(size_t ptr) {
+  return reinterpret_cast<std::shared_ptr<v8::BackingStore>*>(ptr)->get()->MaxByteLength();
+}
+
+bool backing_store_is_shared(size_t ptr) {
+  return reinterpret_cast<std::shared_ptr<v8::BackingStore>*>(ptr)->get()->IsShared();
+}
+
+bool backing_store_is_resizable_by_user_javascript(size_t ptr) {
+  return reinterpret_cast<std::shared_ptr<v8::BackingStore>*>(ptr)
+      ->get()
+      ->IsResizableByUserJavaScript();
+}
+
+// ArrayBuffer detach/detachable/was-detached
+void local_array_buffer_detach(Isolate* isolate, Local& buffer) {
+  local_as_ref_from_ffi<v8::ArrayBuffer>(buffer)->Detach(v8::Local<v8::Value>()).Check();
+}
+
+bool local_array_buffer_was_detached(Isolate* isolate, const Local& buffer) {
+  return local_as_ref_from_ffi<v8::ArrayBuffer>(buffer)->WasDetached();
+}
+
+bool local_array_buffer_is_detachable(Isolate* isolate, const Local& buffer) {
+  return local_as_ref_from_ffi<v8::ArrayBuffer>(buffer)->IsDetachable();
+}
+
+// ArrayBuffer is_shared (value-level check)
+bool local_array_buffer_is_shared(const Local& value) {
+  return local_as_ref_from_ffi<v8::Value>(value)->IsSharedArrayBuffer();
+}
+
 // TypedArray creation functions
+// TODO(perf): These macros duplicate patterns in buffersource.h — unify when the
+// Rust FFI stabilises.
 DEFINE_TYPED_ARRAY_NEW(uint8_array, Uint8Array, uint8_t)
 DEFINE_TYPED_ARRAY_NEW(uint16_array, Uint16Array, uint16_t)
 DEFINE_TYPED_ARRAY_NEW(uint32_array, Uint32Array, uint32_t)

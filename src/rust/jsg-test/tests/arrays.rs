@@ -1040,9 +1040,14 @@ impl SliceResource {
 
     /// Writes `0xFF` into every byte via `as_mut_slice` and returns the length.
     #[jsg_method]
-    pub fn fill_ff(&self, mut arr: jsg::v8::Local<jsg::v8::Uint8Array>) -> jsg::Number {
-        // SAFETY: no other reference into this buffer is live during this call.
-        unsafe { arr.as_mut_slice() }.fill(0xFF);
+    pub fn fill_ff(
+        &self,
+        lock: &mut jsg::Lock,
+        mut arr: jsg::v8::Local<jsg::v8::Uint8Array>,
+    ) -> jsg::Number {
+        // SAFETY: no other reference into this buffer is live during this call;
+        // lock borrow prevents JS from running.
+        unsafe { arr.as_mut_slice(lock) }.fill(0xFF);
         #[expect(clippy::cast_precision_loss)]
         jsg::Number::new(arr.len() as f64)
     }
