@@ -5,7 +5,6 @@
 #pragma once
 
 #include <workerd/io/io-context.h>
-#include <workerd/jsg/async-context.h>
 
 namespace workerd::api {
 
@@ -27,11 +26,6 @@ class JsSpan: public jsg::Object {
   void setAttribute(
       jsg::Lock& js, kj::String key, jsg::Optional<kj::OneOf<bool, double, kj::String>> value);
 
-  // Returns a SpanParent for this span, for use by TracingModule::enterContext() when
-  // pushing it into the async context frame.  Returns a no-op nullptr parent if the
-  // span has already ended.
-  SpanParent getSpanParent();
-
   JSG_RESOURCE_TYPE(JsSpan) {
     JSG_METHOD(end);
     JSG_METHOD(setAttribute);
@@ -40,39 +34,6 @@ class JsSpan: public jsg::Object {
 
  private:
   kj::Maybe<IoOwn<TraceContext>> span;
-};
-
-// Disposable scope returned by TracingModule::enterContext(). Holds the two
-// AsyncContextFrame::StorageScope objects that push the OTel Context JS object
-// and the user-facing SpanParent into the async context frame for the duration
-// of a startActiveSpan() / context.with() call.
-//
-// The TypeScript ContextManager calls [Symbol.dispose]() in its finally block to
-// restore the previous frame, which propagates the pop across await automatically.
-class ContextScope: public jsg::Object {
- public:
-  // Constructs a ContextScope. The two scopes are pre-allocated on the heap and
-  // ownership is transferred in.  The scopes MUST be destroyed in reverse order
-  // (otelContextScope first, then userTraceScope) to restore the frame stack correctly.
-  ContextScope(kj::Own<jsg::AsyncContextFrame::StorageScope> otelContextScope,
-      kj::Own<jsg::AsyncContextFrame::StorageScope> userTraceScope);
-  ~ContextScope() noexcept(false);
-
-  // Called by [Symbol.dispose]() in TypeScript to explicitly restore the prior frame.
-  void dispose(jsg::Lock& js);
-
-  JSG_RESOURCE_TYPE(ContextScope) {
-    JSG_METHOD(dispose);
-    JSG_DISPOSE(dispose);
-  }
-
- private:
-  // Held via kj::Own so the scopes can live on the heap despite being non-movable.
-  // kj::Own is nullable and movable even when T is not.
-  // Destroyed in reverse declaration order: otelContextScope (inner) first,
-  // then userTraceScope (outer), restoring the frame stack in LIFO order.
-  kj::Own<jsg::AsyncContextFrame::StorageScope> otelContextScope;
-  kj::Own<jsg::AsyncContextFrame::StorageScope> userTraceScope;
 };
 
 // Module that provides tracing capabilities for Workers.
@@ -98,28 +59,10 @@ class TracingModule: public jsg::Object {
   //   }
   jsg::Ref<JsSpan> startSpan(jsg::Lock& js, kj::String name);
 
-  // Pushes the given OTel Context JS object and an optional native SpanParent into the
-  // async context frame, returning a disposable ContextScope.  The TypeScript
-  // ContextManager calls this from context.with() so that the new context propagates
-  // across await automatically.
-  //
-  // - otelContextValue: the OTel Context JS object (opaque to C++; stored verbatim).
-  // - nativeSpan: optional JsSpan whose underlying SpanParent becomes the new user
-  //   trace parent. When null, the current user trace parent is preserved unchanged.
-  jsg::Ref<ContextScope> enterContext(
-      jsg::Lock& js, jsg::JsValue otelContextValue, jsg::Optional<jsg::Ref<JsSpan>> nativeSpan);
-
-  // Returns the current OTel Context JS object stored in the async context frame, or
-  // null/undefined if no context has been pushed (e.g., before the first enterContext call).
-  jsg::Optional<jsg::JsValue> getCurrentOtelContext(jsg::Lock& js);
-
   JSG_RESOURCE_TYPE(TracingModule) {
     JSG_METHOD(startSpan);
-    JSG_METHOD(enterContext);
-    JSG_METHOD(getCurrentOtelContext);
 
     JSG_NESTED_TYPE(JsSpan);
-    JSG_NESTED_TYPE(ContextScope);
   }
 };
 
@@ -139,4 +82,4 @@ kj::Own<jsg::modules::ModuleBundle> getInternalTracingModuleBundle(auto featureF
 }
 };  // namespace workerd::api
 
-#define EW_TRACING_MODULE_ISOLATE_TYPES api::TracingModule, api::JsSpan, api::ContextScope
+#define EW_TRACING_MODULE_ISOLATE_TYPES api::TracingModule, api::JsSpan

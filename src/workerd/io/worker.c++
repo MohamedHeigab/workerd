@@ -1097,8 +1097,7 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
       impl(kj::heap<Impl>(*api, *metrics, *limitEnforcer, inspectorPolicy)),
       weakIsolateRef(WeakIsolateRef::wrap(this)),
       traceAsyncContextKey(kj::refcounted<jsg::AsyncContextFrame::StorageKey>()),
-      userTraceAsyncContextKey(kj::refcounted<jsg::AsyncContextFrame::StorageKey>()),
-      otelContextAsyncContextKey(kj::refcounted<jsg::AsyncContextFrame::StorageKey>()) {
+      userTraceAsyncContextKey(kj::refcounted<jsg::AsyncContextFrame::StorageKey>()) {
   api->setIsolateObserver(*metrics);
   metrics->created();
   // We just created our isolate, so we don't need to use Isolate::Impl::Lock (nor an async lock).
@@ -1571,7 +1570,6 @@ Worker::Isolate::~Isolate() noexcept(false) {
     auto inspector = kj::mv(impl->inspector);
     auto dropTraceAsyncContextKey = kj::mv(traceAsyncContextKey);
     auto dropUserTraceAsyncContextKey = kj::mv(userTraceAsyncContextKey);
-    auto dropOtelContextAsyncContextKey = kj::mv(otelContextAsyncContextKey);
     // The Rust Realm must be dropped under lock since Realm::drop() accesses V8 globals
     // and calls drop functions that may interact with V8.
     auto dropRealm = kj::mv(impl->realm);
@@ -2398,11 +2396,6 @@ jsg::AsyncContextFrame::StorageKey& Worker::Lock::getUserTraceAsyncContextKey() 
   return *(isolate.userTraceAsyncContextKey);
 }
 
-jsg::AsyncContextFrame::StorageKey& Worker::Lock::getOtelContextAsyncContextKey() {
-  // const_cast OK because we are a lock on this isolate.
-  auto& isolate = const_cast<Isolate&>(worker.getIsolate());
-  return *(isolate.otelContextAsyncContextKey);
-}
 
 bool Worker::Lock::isInspectorEnabled() {
   return worker.script->isolate->impl->inspector != kj::none;
