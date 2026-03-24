@@ -1692,6 +1692,10 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
     }
   }
 
+  kj::Promise<void> abandonAlarm(kj::Date scheduledTime) override {
+    co_return co_await KJ_ASSERT_NONNULL(inner).abandonAlarm(scheduledTime);
+  }
+
  private:
   kj::Maybe<kj::Own<WorkerTracer>> tracer;
   kj::Maybe<WorkerInterface&> inner;
