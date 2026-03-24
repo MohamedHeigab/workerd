@@ -393,7 +393,7 @@ ActorSqlite::PrecommitAlarmState ActorSqlite::startPrecommitAlarmScheduling() {
     // we commit to local SQLite.
     //
     // By waiting on any pending "move later" alarm, we correctly serialize our `scheduleRun()`
-    // calls to the alarm manager.
+    // calls to the alarm scheduler.
     state.schedulingPromise =
         requestScheduledAlarm(metadata.getAlarm(), alarmLaterChain.addBranch());
   }

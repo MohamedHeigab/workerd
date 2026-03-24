@@ -262,6 +262,13 @@ class ActorCacheInterface: public ActorCacheOps {
 
   virtual void cancelDeferredAlarmDeletion() = 0;
 
+  // Called by AlarmManager when it has given up retrying an alarm after too many counted failures.
+  // Implementations should clear the alarm from their local state so getAlarm() reflects the
+  // deletion.
+  virtual kj::Promise<void> abandonAlarm(kj::Date scheduledTime) {
+    return kj::READY_NOW;
+  }
+
   virtual kj::Maybe<kj::Promise<void>> onNoPendingFlush(SpanParent parentSpan) = 0;
 
   // Implements the respective PITR API calls. The default implementations throw JSG errors saying
@@ -380,6 +387,7 @@ class ActorCache final: public ActorCacheInterface {
       bool noCache = false,
       kj::StringPtr actorId = "") override;
   void cancelDeferredAlarmDeletion() override;
+  kj::Promise<void> abandonAlarm(kj::Date scheduledTime) override;
   kj::Maybe<kj::Promise<void>> onNoPendingFlush(SpanParent parentSpan) override;
   // See ActorCacheInterface
 
