@@ -16,6 +16,20 @@ namespace workerd::api {
 
 namespace {
 
+constexpr bool isAlphanumericString(kj::StringPtr s) {
+  for (auto c: s) {
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) return false;
+  }
+  return true;
+}
+
+constexpr bool isPrintableAsciiString(kj::StringPtr s) {
+  for (auto c: s) {
+    if (c < 0x20 || c > 0x7E) return false;
+  }
+  return true;
+}
+
 kj::Maybe<kj::Path> parseRestorePath(kj::StringPtr path) {
   JSG_REQUIRE(path.size() > 0 && path[0] == '/', TypeError,
       "Directory snapshot restore path must be absolute. Got: ", path);
@@ -85,20 +99,14 @@ void Container::start(jsg::Lock& js, jsg::Optional<StartupOptions> maybeOptions)
     for (auto i: kj::indices(labels.fields)) {
       auto& field = labels.fields[i];
       JSG_REQUIRE(field.name.size() > 0, Error, "Label names cannot be empty");
-      for (auto c: field.name) {
-        bool isAlphanumeric =
-            (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-        JSG_REQUIRE(isAlphanumeric, Error,
-            "Label names must contain only alphanumeric characters (A-Z, a-z, 0-9) "
-            "at index ",
-            i);
-      }
-      for (auto c: field.value) {
-        JSG_REQUIRE(c >= 0x20 && c <= 0x7E, Error,
-            "Label values must contain only printable ASCII characters "
-            "at index ",
-            i);
-      }
+      JSG_REQUIRE(isAlphanumericString(field.name), Error,
+          "Label names must contain only alphanumeric characters (A-Z, a-z, 0-9) "
+          "at index ",
+          i);
+      JSG_REQUIRE(isPrintableAsciiString(field.value), Error,
+          "Label values must contain only printable ASCII characters "
+          "at index ",
+          i);
       list[i].setName(field.name);
       list[i].setValue(field.value);
     }
