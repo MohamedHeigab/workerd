@@ -38,6 +38,7 @@ constexpr uint64_t MAX_JSON_RESPONSE_SIZE = 16ULL * 1024 * 1024;
 
 constexpr kj::StringPtr SNAPSHOT_VOLUME_PREFIX = "workerd-snap-"_kj;
 constexpr kj::StringPtr SNAPSHOT_CLONE_VOLUME_PREFIX = "workerd-snap-clone-"_kj;
+constexpr kj::StringPtr CONTAINER_SNAPSHOT_IMAGE_PREFIX = "workerd-container-snap-"_kj;
 constexpr kj::StringPtr SNAPSHOT_VOLUME_CREATED_AT_LABEL = "dev.workerd.snapshot-created-at"_kj;
 constexpr auto SNAPSHOT_STALE_AGE = 30 * kj::DAYS;
 
@@ -51,22 +52,6 @@ constexpr size_t MAX_TAR_CONTENT_SIZE = 8ull * 1024 * 1024 * 1024;
 
 // Ensures the stale-volume check runs at most once per process.
 std::atomic_bool staleSnapshotVolumeCheckScheduled = false;
-
-// Validates an absolute path for snapshot use and returns the parsed component path.
-// Rejects relative paths, embedded null bytes, and path traversal components ("..").
-kj::Path parseAbsolutePath(kj::StringPtr path) {
-  JSG_REQUIRE(
-      path.size() > 0 && path[0] == '/', Error, "Snapshot path must be absolute, got: ", path);
-
-  JSG_REQUIRE(path.findFirst('\0') == kj::none, Error, "Snapshot path must not contain null bytes");
-
-  try {
-    return kj::Path::parse(path.slice(1));
-  } catch (kj::Exception& e) {
-    JSG_FAIL_REQUIRE(
-        Error, "Snapshot path contains invalid components: ", path, "; ", e.getDescription());
-  }
-}
 
 struct ParsedAddress {
   kj::OneOf<kj::CidrRange, kj::String> destination;
@@ -87,6 +72,33 @@ struct DockerBinaryResponse {
   kj::uint statusCode;
   kj::Array<kj::byte> body;
 };
+
+// Validates an absolute path for snapshot use and returns the parsed component path.
+// Rejects relative paths, embedded null bytes, and path traversal components ("..").
+kj::Path parseAbsolutePath(kj::StringPtr path) {
+  JSG_REQUIRE(
+      path.size() > 0 && path[0] == '/', Error, "Snapshot path must be absolute, got: ", path);
+
+  JSG_REQUIRE(path.findFirst('\0') == kj::none, Error, "Snapshot path must not contain null bytes");
+
+  try {
+    return kj::Path::parse(path.slice(1));
+  } catch (kj::Exception& e) {
+    JSG_FAIL_REQUIRE(
+        Error, "Snapshot path contains invalid components: ", path, "; ", e.getDescription());
+  }
+}
+
+// Parse and validate a snapshot ID. Throws an error if the snapshot ID is invalid.
+kj::String parseSnapshotId(kj::StringPtr snapshotId) {
+  KJ_IF_SOME(uuid, UUID::fromString(snapshotId)) {
+    auto s = uuid.toString();
+    JSG_REQUIRE(s == snapshotId, Error, "Invalid snapshot ID", snapshotId);
+    return s;
+  } else {
+    JSG_FAIL_REQUIRE(Error, "Invalid snapshot ID", snapshotId);
+  }
+}
 
 // Strips a port suffix from a string, returning the host and port separately.
 // For IPv6, expects brackets: "[::1]:8080" -> ("::1", 8080)
@@ -1131,7 +1143,7 @@ kj::Promise<void> ContainerClient::updateSidecarEgressConfig(
       "Updating sidecar egress config failed with: ", response.statusCode, " ", response.body);
 }
 
-kj::Promise<void> ContainerClient::createContainer(
+kj::Promise<void> ContainerClient::createContainer(kj::StringPtr effectiveImage,
     kj::Maybe<capnp::List<capnp::Text>::Reader> entrypoint,
     kj::Maybe<capnp::List<capnp::Text>::Reader> environment,
     kj::ArrayPtr<const SnapshotRestoreMount> restoreMounts,
@@ -1140,7 +1152,7 @@ kj::Promise<void> ContainerClient::createContainer(
   codec.handleByAnnotation<docker_api::Docker::ContainerCreateRequest>();
   capnp::MallocMessageBuilder message;
   auto jsonRoot = message.initRoot<docker_api::Docker::ContainerCreateRequest>();
-  jsonRoot.setImage(imageName);
+  jsonRoot.setImage(effectiveImage);
   // Add entrypoint if provided
   KJ_IF_SOME(ep, entrypoint) {
     auto jsonCmd = jsonRoot.initCmd(ep.size());
@@ -1215,7 +1227,8 @@ kj::Promise<void> ContainerClient::createContainer(
 
   // statusCode 201 refers to "container created successfully"
   if (response.statusCode != 201) {
-    JSG_REQUIRE(response.statusCode != 404, Error, "No such image available named ", imageName);
+    JSG_REQUIRE(
+        response.statusCode != 404, Error, "No such image available named ", effectiveImage);
     JSG_REQUIRE(response.statusCode != 409, Error, "Container already exists");
     JSG_FAIL_REQUIRE(
         Error, "Create container failed with [", response.statusCode, "] ", response.body);
@@ -1338,7 +1351,7 @@ kj::Promise<void> ContainerClient::destroySidecarContainer() {
   co_await removeContainer(network, kj::str(dockerPath), kj::str(sidecarContainerName));
 }
 
-kj::Promise<void> ContainerClient::createDockerVolume(kj::StringPtr volumeName) {
+kj::Promise<void> ContainerClient::createVolume(kj::StringPtr volumeName) {
   capnp::JsonCodec codec;
   codec.handleByAnnotation<docker_api::Docker::VolumeCreateRequest>();
   capnp::MallocMessageBuilder message;
@@ -1356,13 +1369,41 @@ kj::Promise<void> ContainerClient::createDockerVolume(kj::StringPtr volumeName) 
       response.body);
 }
 
-kj::Promise<void> ContainerClient::deleteDockerVolume(kj::String volumeName) {
+kj::Promise<void> ContainerClient::deleteVolume(kj::String volumeName) {
   auto response = co_await dockerApiRequest(
       network, kj::str(dockerPath), kj::HttpMethod::DELETE, kj::str("/volumes/", volumeName));
   // 204 = deleted, 404 = not found (both are fine)
   JSG_REQUIRE(response.statusCode == 204 || response.statusCode == 404, Error,
       "Failed to delete Docker volume '", volumeName, "': ", response.statusCode, " ",
       response.body);
+}
+
+kj::Promise<void> ContainerClient::commitContainer(kj::StringPtr imageRef) {
+  auto response = co_await dockerApiRequest(network, kj::str(dockerPath), kj::HttpMethod::POST,
+      kj::str("/commit?container=", containerName,
+          "&pause=true&repo=", kj::encodeUriComponent(imageRef)),
+      kj::str(""));
+  JSG_REQUIRE(response.statusCode == 201, Error, "Failed to commit container to image '", imageRef,
+      "': ", response.statusCode, " ", response.body);
+}
+
+kj::Promise<ContainerClient::ImageInspectResponse> ContainerClient::inspectImage(
+    kj::StringPtr imageRef) {
+  auto response = co_await dockerApiRequest(network, kj::str(dockerPath), kj::HttpMethod::GET,
+      kj::str("/images/", kj::encodeUriComponent(imageRef), "/json"));
+  JSG_REQUIRE(response.statusCode == 200, Error, "Failed to inspect Docker image '", imageRef,
+      "': ", response.statusCode, " ", response.body);
+
+  auto message = decodeJsonResponse<docker_api::Docker::ImageInspectResponse>(response.body);
+  auto root = message->getRoot<docker_api::Docker::ImageInspectResponse>();
+  co_return ImageInspectResponse{kj::str(root.getId()), root.getSize()};
+}
+
+kj::Promise<void> ContainerClient::deleteImage(kj::String imageRef) {
+  auto response = co_await dockerApiRequest(network, kj::str(dockerPath), kj::HttpMethod::DELETE,
+      kj::str("/images/", kj::encodeUriComponent(imageRef), "?noprune=true"));
+  JSG_REQUIRE(response.statusCode == 200 || response.statusCode == 404, Error,
+      "Failed to delete Docker image '", imageRef, "': ", response.statusCode, " ", response.body);
 }
 
 kj::Promise<kj::String> ContainerClient::createTempContainerWithVolume(
@@ -1388,12 +1429,11 @@ kj::Promise<kj::String> ContainerClient::createTempContainerWithVolume(
 }
 
 kj::Promise<void> ContainerClient::cloneSnapshot(SnapshotRestoreMount& snapshot) {
-  co_await createDockerVolume(snapshot.cloneVolume);
+  co_await createVolume(snapshot.cloneVolume);
 
   bool cloneCommitted = false;
   KJ_DEFER(if (!cloneCommitted) {
-    waitUntilTasks.add(
-        deleteDockerVolume(kj::str(snapshot.cloneVolume)).catch_([](kj::Exception&&) {
+    waitUntilTasks.add(deleteVolume(kj::str(snapshot.cloneVolume)).catch_([](kj::Exception&&) {
     }).attach(addRef()));
   });
 
@@ -1524,8 +1564,13 @@ kj::Promise<void> ContainerClient::start(StartContext context) {
 
   internetEnabled = params.getEnableInternet();
 
-  JSG_REQUIRE(!params.hasContainerSnapshot(), Error,
-      "container.start({ containerSnapshot }) is not implemented for local Docker containers yet.");
+  kj::String effectiveImage = kj::str(imageName);
+  if (params.hasContainerSnapshot()) {
+    auto snapshot = params.getContainerSnapshot();
+    auto snapshotId = parseSnapshotId(snapshot.getId());
+    effectiveImage = kj::str(CONTAINER_SNAPSHOT_IMAGE_PREFIX, snapshotId);
+    co_await inspectImage(effectiveImage);
+  }
 
   // If startup fails after we clone any snapshot volumes, tear down the app container first and
   // then delete those clone volumes so we don't leave mounted Docker volumes behind.
@@ -1540,19 +1585,14 @@ kj::Promise<void> ContainerClient::start(StartContext context) {
     for (auto i: kj::zeroTo(snapshotList.size())) {
       auto entry = snapshotList[i];
       auto snapshot = entry.getSnapshot();
-      auto snapshotId = kj::str(snapshot.getId());
+      auto snapshotId = parseSnapshotId(snapshot.getId());
       auto dir = kj::str(snapshot.getDir());
-
-      JSG_REQUIRE(
-          snapshotId.size() > 0 && snapshotId.size() <= 64, Error, "Invalid snapshot ID length");
-      for (auto c: snapshotId) {
-        JSG_REQUIRE((c >= 'a' && c <= 'f') || (c >= '0' && c <= '9') || c == '-', Error,
-            "Invalid snapshot ID: must contain only hex digits and hyphens");
-      }
 
       const auto mountPointText = entry.getMountPoint();
       auto restorePath =
           parseAbsolutePath(mountPointText.size() > 0 ? mountPointText : snapshot.getDir());
+      JSG_REQUIRE(restorePath.toString(true) != "/", Error,
+          "Directory snapshot cannot be restored to root directory.");
 
       auto sourceVolume = kj::str(SNAPSHOT_VOLUME_PREFIX, snapshotId);
 
@@ -1575,7 +1615,7 @@ kj::Promise<void> ContainerClient::start(StartContext context) {
   co_await ensureSidecarStarted();
 
   caCertInjected.store(false, std::memory_order_release);
-  co_await createContainer(entrypoint, environment, restoreMounts.asPtr(), params);
+  co_await createContainer(effectiveImage, entrypoint, environment, restoreMounts.asPtr(), params);
 
   for (auto& mapping: egressState->mappings) {
     if (mapping.tls) {
@@ -1697,11 +1737,11 @@ kj::Promise<void> ContainerClient::snapshotDirectory(SnapshotDirectoryContext co
   // Create a Docker volume to store the snapshot contents. If anything after this
   // fails, clean up the volume so we don't leak Docker resources on retries.
   auto volumeName = kj::str(SNAPSHOT_VOLUME_PREFIX, snapshotId);
-  co_await createDockerVolume(volumeName);
+  co_await createVolume(volumeName);
   bool volumeCommitted = false;
   KJ_DEFER(if (!volumeCommitted) {
     waitUntilTasks.add(
-        deleteDockerVolume(kj::str(volumeName)).catch_([](kj::Exception&&) {}).attach(addRef()));
+        deleteVolume(kj::str(volumeName)).catch_([](kj::Exception&&) {}).attach(addRef()));
   });
 
   // Store the contents tar in the volume via a temp container mounted at /mnt.
@@ -1732,10 +1772,33 @@ kj::Promise<void> ContainerClient::snapshotContainer(SnapshotContainerContext co
   co_await ready;
   KJ_DEFER(done->fulfill());
 
+  const auto params = context.getParams();
+
   JSG_REQUIRE(containerStarted.load(std::memory_order_acquire), Error,
       "snapshotContainer() requires a running container.");
-  JSG_FAIL_REQUIRE(
-      Error, "snapshotContainer() is not implemented for local Docker containers yet.");
+
+  auto snapshotId = randomUUID(kj::none);
+  auto imageRef = kj::str(CONTAINER_SNAPSHOT_IMAGE_PREFIX, snapshotId);
+  bool imageCommitted = false;
+  KJ_DEFER(if (imageCommitted) {
+    waitUntilTasks.add(
+        deleteImage(kj::str(imageRef)).catch_([](kj::Exception&&) {}).attach(addRef()));
+  });
+
+  co_await commitContainer(imageRef);
+  imageCommitted = true;
+
+  auto image = co_await inspectImage(imageRef);
+
+  auto result = context.getResults().initSnapshot();
+  result.setId(snapshotId);
+  result.setSize(image.size);
+  if (params.hasName() && params.getName().size() > 0) {
+    result.setName(params.getName());
+  }
+
+  imageCommitted = false;
+>>>>>>> conflict 1 of 1 ends
 }
 
 kj::Promise<void> ContainerClient::getTcpPort(GetTcpPortContext context) {

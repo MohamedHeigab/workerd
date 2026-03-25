@@ -133,11 +133,17 @@ class ContainerClient final: public rpc::Container::Server, public kj::Refcounte
     kj::String cloneVolume;
   };
 
+  struct ImageInspectResponse {
+    kj::String id;
+    uint64_t size;
+  };
+
   kj::Promise<InspectResponse> inspectContainer();
 
   kj::Promise<void> updateSidecarEgressPort(uint16_t ingressHostPort, uint16_t egressPort);
   kj::Promise<void> updateSidecarEgressConfig(uint16_t ingressHostPort, uint16_t egressPort);
-  kj::Promise<void> createContainer(kj::Maybe<capnp::List<capnp::Text>::Reader> entrypoint,
+  kj::Promise<void> createContainer(kj::StringPtr effectiveImage,
+      kj::Maybe<capnp::List<capnp::Text>::Reader> entrypoint,
       kj::Maybe<capnp::List<capnp::Text>::Reader> environment,
       kj::ArrayPtr<const SnapshotRestoreMount> restoreMounts,
       rpc::Container::StartParams::Reader params);
@@ -147,8 +153,11 @@ class ContainerClient final: public rpc::Container::Server, public kj::Refcounte
   kj::Promise<void> destroyContainer();
 
   // Docker volume management for snapshots
-  kj::Promise<void> createDockerVolume(kj::StringPtr volumeName);
-  kj::Promise<void> deleteDockerVolume(kj::String volumeName);
+  kj::Promise<void> createVolume(kj::StringPtr volumeName);
+  kj::Promise<void> deleteVolume(kj::String volumeName);
+  kj::Promise<void> commitContainer(kj::StringPtr imageRef);
+  kj::Promise<ImageInspectResponse> inspectImage(kj::StringPtr imageRef);
+  kj::Promise<void> deleteImage(kj::String imageRef);
   kj::Promise<kj::String> createTempContainerWithVolume(
       kj::StringPtr volumeName, kj::StringPtr mountPath);
   // Creates a writable clone volume by copying an existing snapshot volume through a

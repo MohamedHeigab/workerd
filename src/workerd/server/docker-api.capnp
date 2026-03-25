@@ -185,6 +185,10 @@ struct Docker {
     statusCode @0 :Int32 $Json.name("StatusCode");
   }
 
+  struct ContainerCommitResponse {
+    id @0 :Text $Json.name("Id");
+  }
+
   struct ContainerState {
     # Container's running state
     status @0 :Text $Json.name("Status"); # "created", "running", "paused", "restarting", "removing", "exited", "dead"
@@ -273,6 +277,11 @@ struct Docker {
     args @3 :List(Text) $Json.name("Args");
     state @4 :ContainerState $Json.name("State");
     networkSettings @5 :NetworkSettings $Json.name("NetworkSettings");
+  }
+
+  struct ImageInspectResponse {
+    id @0 :Text $Json.name("Id");
+    size @1 :UInt64 $Json.name("Size");
   }
 
   struct Command {

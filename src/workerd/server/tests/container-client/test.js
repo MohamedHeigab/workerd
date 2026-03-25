@@ -592,6 +592,67 @@ export class DurableObjectExample extends DurableObject {
     await monitor;
   }
 
+  async createContainerSnapshotForTransfer() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    container.start({ enableInternet: true });
+    const monitor = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const writeResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/app/data/full-cross-do.txt', {
+        method: 'POST',
+        body: 'cross-do-container-snapshot',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(writeResp.status, 200);
+
+    const snapshot = await container.snapshotContainer({
+      name: 'cross-do-container-snapshot',
+    });
+
+    await container.destroy();
+    await monitor;
+
+    return snapshot;
+  }
+
+  async restoreTransferredContainerSnapshot(snapshot) {
+    assert.ok(snapshot.id, 'snapshot must have a non-empty id');
+    assert.ok(snapshot.size > 0, 'snapshot must have a positive size');
+
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    container.start({
+      enableInternet: true,
+      containerSnapshot: snapshot,
+    });
+    const monitor = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const readResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/data/full-cross-do.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(readResp.status, 200);
+    assert.strictEqual(await readResp.text(), 'cross-do-container-snapshot');
+
+    await container.destroy();
+    await monitor;
+  }
+
   async testSetEgressHttp() {
     const container = this.ctx.container;
 
@@ -1523,6 +1584,435 @@ export class DurableObjectExample extends DurableObject {
     await container.destroy();
     await monitor;
   }
+
+  async testContainerSnapshotRoundTrip() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    assert.strictEqual(container.running, false);
+
+    container.start({ enableInternet: true });
+    const monitor = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const writeResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/app/data/full-snapshot.txt', {
+        method: 'POST',
+        body: 'full-snapshot-content',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(writeResp.status, 200);
+
+    const tmpWriteResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/tmp/full-snapshot-tmp.txt', {
+        method: 'POST',
+        body: 'tmp-full-snapshot-content',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(tmpWriteResp.status, 200);
+
+    const snapshot = await container.snapshotContainer({});
+    assert.strictEqual(typeof snapshot.id, 'string');
+    assert.ok(snapshot.id.length > 0, 'snapshot id should be non-empty');
+    assert.ok(snapshot.size > 0, 'snapshot size should be > 0');
+    assert.strictEqual(snapshot.name, undefined);
+
+    await container.destroy();
+    await monitor;
+    assert.strictEqual(container.running, false);
+
+    container.start({
+      enableInternet: true,
+      containerSnapshot: snapshot,
+    });
+    const monitor2 = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const readResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/data/full-snapshot.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(readResp.status, 200);
+    assert.strictEqual(await readResp.text(), 'full-snapshot-content');
+
+    const tmpReadResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/tmp/full-snapshot-tmp.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(tmpReadResp.status, 200);
+    assert.strictEqual(await tmpReadResp.text(), 'tmp-full-snapshot-content');
+
+    await container.destroy();
+    await monitor2;
+  }
+
+  async testContainerSnapshotNamedRoundTrip() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    container.start({ enableInternet: true });
+    const monitor = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/app/data/full-named.txt', {
+        method: 'POST',
+        body: 'named-container-snapshot',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+
+    const snapshot = await container.snapshotContainer({
+      name: 'named-container-snapshot',
+    });
+    assert.strictEqual(snapshot.name, 'named-container-snapshot');
+
+    await container.destroy();
+    await monitor;
+
+    container.start({
+      enableInternet: true,
+      containerSnapshot: snapshot,
+    });
+    const monitor2 = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const readResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/data/full-named.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(readResp.status, 200);
+    assert.strictEqual(await readResp.text(), 'named-container-snapshot');
+
+    await container.destroy();
+    await monitor2;
+  }
+
+  async testContainerSnapshotRestoreNonExistentId() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    const fakeSnapshot = {
+      id: 'feedface-0000-0000-0000-000000000000',
+      size: 1024,
+    };
+
+    await assert.rejects(
+      () =>
+        new Promise((resolve, reject) => {
+          try {
+            container.start({
+              enableInternet: true,
+              containerSnapshot: fakeSnapshot,
+            });
+          } catch (err) {
+            return reject(err);
+          }
+          container.monitor().then(resolve).catch(reject);
+        }),
+      (err) => {
+        assert.strictEqual(err.message, 'Container failed to start');
+        return true;
+      }
+    );
+
+    assert.strictEqual(container.running, false);
+  }
+
+  async testContainerSnapshotWithDirectoryOverlay() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    container.start({ enableInternet: true });
+    const monitor = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/app/data/from-full.txt', {
+        method: 'POST',
+        body: 'from-full-snapshot',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/app/overlay-target/shared.txt', {
+        method: 'POST',
+        body: 'from-full-layer',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    await container
+      .getTcpPort(8080)
+      .fetch(
+        'http://foo/write-file?path=/app/overlay-target/full-only-hidden.txt',
+        {
+          method: 'POST',
+          body: 'hidden-by-overlay',
+          signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+        }
+      );
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/tmp/overlay-source/shared.txt', {
+        method: 'POST',
+        body: 'from-directory-overlay',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    await container
+      .getTcpPort(8080)
+      .fetch(
+        'http://foo/write-file?path=/tmp/overlay-source/overlay-only.txt',
+        {
+          method: 'POST',
+          body: 'overlay-only-content',
+          signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+        }
+      );
+
+    const directorySnapshot = await container.snapshotDirectory({
+      dir: '/tmp/overlay-source',
+    });
+    const containerSnapshot = await container.snapshotContainer({
+      name: 'container-with-overlay',
+    });
+
+    await container.destroy();
+    await monitor;
+
+    container.start({
+      enableInternet: true,
+      containerSnapshot,
+      directorySnapshots: [
+        { snapshot: directorySnapshot, mountPoint: '/app/overlay-target' },
+      ],
+    });
+    const monitor2 = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const fullResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/data/from-full.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(fullResp.status, 200);
+    assert.strictEqual(await fullResp.text(), 'from-full-snapshot');
+
+    const overlayResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/overlay-target/shared.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(overlayResp.status, 200);
+    assert.strictEqual(await overlayResp.text(), 'from-directory-overlay');
+
+    const overlayOnlyResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/overlay-target/overlay-only.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(overlayOnlyResp.status, 200);
+    assert.strictEqual(await overlayOnlyResp.text(), 'overlay-only-content');
+
+    const hiddenFullResp = await container
+      .getTcpPort(8080)
+      .fetch(
+        'http://foo/read-file?path=/app/overlay-target/full-only-hidden.txt',
+        {
+          signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+        }
+      );
+    assert.equal(hiddenFullResp.status, 404);
+
+    await container.destroy();
+    await monitor2;
+  }
+
+  async testContainerSnapshotExcludesDirectoryMounts() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    container.start({ enableInternet: true });
+    const monitor = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/tmp/mounted-source/mounted.txt', {
+        method: 'POST',
+        body: 'from-mounted-directory',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+
+    const directorySnapshot = await container.snapshotDirectory({
+      dir: '/tmp/mounted-source',
+    });
+
+    await container.destroy();
+    await monitor;
+
+    container.start({
+      enableInternet: true,
+      directorySnapshots: [
+        { snapshot: directorySnapshot, mountPoint: '/app/mounted' },
+      ],
+    });
+    const monitor2 = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const mountedResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/mounted/mounted.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(mountedResp.status, 200);
+    assert.strictEqual(await mountedResp.text(), 'from-mounted-directory');
+
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/app/data/local-after-mount.txt', {
+        method: 'POST',
+        body: 'container-local-state',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+
+    const containerSnapshot = await container.snapshotContainer({
+      name: 'exclude-mounted-directory',
+    });
+
+    await container.destroy();
+    await monitor2;
+
+    container.start({
+      enableInternet: true,
+      containerSnapshot,
+    });
+    const monitor3 = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const localResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/data/local-after-mount.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(localResp.status, 200);
+    assert.strictEqual(await localResp.text(), 'container-local-state');
+
+    const missingMountedResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/mounted/mounted.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(missingMountedResp.status, 404);
+
+    await container.destroy();
+    await monitor3;
+  }
+
+  async testContainerSnapshotRelayerWithDirectoryMounts() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    container.start({ enableInternet: true });
+    const monitor = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/tmp/relayer-source/overlay.txt', {
+        method: 'POST',
+        body: 'overlay-after-relayer',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+
+    const directorySnapshot = await container.snapshotDirectory({
+      dir: '/tmp/relayer-source',
+    });
+
+    await container.destroy();
+    await monitor;
+
+    container.start({
+      enableInternet: true,
+      directorySnapshots: [
+        { snapshot: directorySnapshot, mountPoint: '/app/relayer' },
+      ],
+    });
+    const monitor2 = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    await container
+      .getTcpPort(8080)
+      .fetch('http://foo/write-file?path=/app/data/re-layered.txt', {
+        method: 'POST',
+        body: 'from-full-container-snapshot',
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+
+    const containerSnapshot = await container.snapshotContainer({
+      name: 'relayer-container-snapshot',
+    });
+
+    await container.destroy();
+    await monitor2;
+
+    container.start({
+      enableInternet: true,
+      containerSnapshot,
+      directorySnapshots: [
+        { snapshot: directorySnapshot, mountPoint: '/app/relayer' },
+      ],
+    });
+    const monitor3 = container.monitor().catch((_err) => {});
+    await this.waitUntilContainerIsHealthy();
+
+    const relayerResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/relayer/overlay.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(relayerResp.status, 200);
+    assert.strictEqual(await relayerResp.text(), 'overlay-after-relayer');
+
+    const fullResp = await container
+      .getTcpPort(8080)
+      .fetch('http://foo/read-file?path=/app/data/re-layered.txt', {
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_DURATION),
+      });
+    assert.equal(fullResp.status, 200);
+    assert.strictEqual(await fullResp.text(), 'from-full-container-snapshot');
+
+    await container.destroy();
+    await monitor3;
+  }
 }
 
 export class TestService extends WorkerEntrypoint {
@@ -2003,5 +2493,93 @@ export const testSnapshotCrossDoRestore = {
     assert.strictEqual(snapshot.name, 'cross-do-snapshot');
 
     await target.restoreTransferredSnapshot(snapshot);
+  },
+};
+
+// Test full container snapshot round-trip: write file -> snapshot -> destroy -> restore -> verify
+export const testContainerSnapshotRoundTrip = {
+  async test(_ctrl, env) {
+    const id = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName('testContainerSnapshotRoundTrip')
+    );
+    const stub = env.MY_CONTAINER.get(id);
+    await stub.testContainerSnapshotRoundTrip();
+  },
+};
+
+// Test full container snapshot with a human-friendly name.
+export const testContainerSnapshotNamedRoundTrip = {
+  async test(_ctrl, env) {
+    const id = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName('testContainerSnapshotNamedRoundTrip')
+    );
+    const stub = env.MY_CONTAINER.get(id);
+    await stub.testContainerSnapshotNamedRoundTrip();
+  },
+};
+
+// Test that a full container snapshot created by one DO can be restored by another.
+export const testContainerSnapshotCrossDoRestore = {
+  async test(_ctrl, env) {
+    const sourceId = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName('testContainerSnapshotCrossDoRestore-source')
+    );
+    const targetId = env.MY_DUPLICATE_CONTAINER.idFromName(
+      getRandomDurableObjectName('testContainerSnapshotCrossDoRestore-target')
+    );
+
+    const source = env.MY_CONTAINER.get(sourceId);
+    const target = env.MY_DUPLICATE_CONTAINER.get(targetId);
+
+    const snapshot = await source.createContainerSnapshotForTransfer();
+    assert.strictEqual(snapshot.name, 'cross-do-container-snapshot');
+
+    await target.restoreTransferredContainerSnapshot(snapshot);
+  },
+};
+
+// Test that restoring a full container snapshot with a nonexistent ID fails.
+export const testContainerSnapshotRestoreNonExistentId = {
+  async test(_ctrl, env) {
+    const id = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName('testContainerSnapshotRestoreNonExistentId')
+    );
+    const stub = env.MY_CONTAINER.get(id);
+    await stub.testContainerSnapshotRestoreNonExistentId();
+  },
+};
+
+// Test that a full container snapshot can be layered with a directory snapshot restore.
+export const testContainerSnapshotWithDirectoryOverlay = {
+  async test(_ctrl, env) {
+    const id = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName('testContainerSnapshotWithDirectoryOverlay')
+    );
+    const stub = env.MY_CONTAINER.get(id);
+    await stub.testContainerSnapshotWithDirectoryOverlay();
+  },
+};
+
+// Test that full container snapshots exclude active directory snapshot mounts.
+export const testContainerSnapshotExcludesDirectoryMounts = {
+  async test(_ctrl, env) {
+    const id = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName('testContainerSnapshotExcludesDirectoryMounts')
+    );
+    const stub = env.MY_CONTAINER.get(id);
+    await stub.testContainerSnapshotExcludesDirectoryMounts();
+  },
+};
+
+// Test that a full container snapshot taken while directory snapshots are active can be re-layered.
+export const testContainerSnapshotRelayerWithDirectoryMounts = {
+  async test(_ctrl, env) {
+    const id = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName(
+        'testContainerSnapshotRelayerWithDirectoryMounts'
+      )
+    );
+    const stub = env.MY_CONTAINER.get(id);
+    await stub.testContainerSnapshotRelayerWithDirectoryMounts();
   },
 };
