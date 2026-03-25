@@ -5,15 +5,12 @@
 // Streaming tail worker for user-trace-span-test.
 //
 // Verifies that user trace spans produced by makeUserTraceSpan() → getCurrentUserTraceSpan()
-// have the correct parent-child relationships.
+// have correct parent-child nesting.
 //
 // The source worker creates an explicit user span ("outer-op") via withSpan() and makes a
-// fetch subrequest INSIDE that span's lifetime.  Since enterContext() is not yet implemented,
-// getCurrentUserTraceSpan() always falls back to the IncomingRequest root user span, meaning
-// BOTH the "outer-op" span and the "fetch" span should be flat siblings under the root.
-//
-// When enterContext() is implemented (Phase 0b), the "fetch" span should become a child of
-// "outer-op" instead.  Update this test accordingly when that lands.
+// fetch subrequest INSIDE that span's lifetime.  startSpan() pushes the user span into
+// userTraceAsyncContextKey, so getCurrentUserTraceSpan() returns it as the parent for any
+// nested spans.  The fetch span should therefore be a CHILD of outer-op, not a sibling.
 
 import assert from 'node:assert';
 
@@ -116,24 +113,26 @@ export const test = {
       '"outer-op" should have test=nesting attribute'
     );
 
-    // KEY ASSERTION: Both spans should be children of the TOP-LEVEL span (flat / siblings).
-    // This is because enterContext() is not implemented yet, so getCurrentUserTraceSpan()
-    // always falls back to the IncomingRequest root user span — every user span created in
-    // the same request is a sibling under the root.
-    //
-    // Once enterContext() is implemented (Phase 0b), the fetch span should become a child of
-    // outer-op, and this assertion should change to:
-    //   assert.strictEqual(fetchSpan.parentSpanId, outerSpanId);
+    // The "outer-op" span should be a direct child of the top-level (root) span.
     assert.strictEqual(
       outerSpan.parentSpanId,
       target.topLevelSpanId,
       '"outer-op" should be a child of the root span'
     );
+
+    // KEY ASSERTION: The "fetch" span should be a child of "outer-op", NOT a sibling.
+    // startSpan() pushes the new span's SpanParent into userTraceAsyncContextKey via a
+    // StorageScope.  While that scope is active, getCurrentUserTraceSpan() returns the
+    // pushed span, so any nested makeUserTraceSpan() call (like the fetch subrequest)
+    // picks it up as its parent.
+    const outerSpanId = Array.from(target.spans.entries()).find(
+      ([, s]) => s.name === 'outer-op'
+    )[0];
     assert.strictEqual(
       fetchSpan.parentSpanId,
-      target.topLevelSpanId,
-      '"fetch" should be a child of the root span (not nested under "outer-op"), ' +
-        'because enterContext() is not yet implemented'
+      outerSpanId,
+      `"fetch" should be nested under "outer-op" (expected parent=${outerSpanId}, ` +
+        `got parent=${fetchSpan.parentSpanId})`
     );
 
     // Verify the outcome event was received.

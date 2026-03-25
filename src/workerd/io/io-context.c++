@@ -1087,6 +1087,15 @@ IoContext::TraceScope IoContext::makeAsyncTraceScope(
   return TraceScope{kj::mv(internalScope)};
 }
 
+kj::Own<jsg::AsyncContextFrame::StorageScope> IoContext::pushUserTraceSpan(
+    jsg::Lock& js, SpanParent userSpan) {
+  auto& lock = KJ_ASSERT_NONNULL(currentLock, "pushUserTraceSpan requires the JS lock");
+  auto ioOwnSpan = addObject(kj::heap(kj::mv(userSpan)));
+  auto handle = jsg::wrapOpaque(js.v8Context(), kj::mv(ioOwnSpan));
+  return kj::heap<jsg::AsyncContextFrame::StorageScope>(
+      js, lock.getUserTraceAsyncContextKey(), js.v8Ref(handle));
+}
+
 SpanParent IoContext::getCurrentTraceSpan() {
   // If called while lock is held, try to use the trace info stored in the async context.
   KJ_IF_SOME(lock, currentLock) {

@@ -6,13 +6,19 @@
 
 namespace workerd::api {
 
-JsSpan::JsSpan(kj::Maybe<IoOwn<TraceContext>> span): span(kj::mv(span)) {}
+JsSpan::JsSpan(kj::Maybe<IoOwn<TraceContext>> span,
+    kj::Maybe<kj::Own<jsg::AsyncContextFrame::StorageScope>> userScope)
+    : span(kj::mv(span)),
+      userScope(kj::mv(userScope)) {}
 
 JsSpan::~JsSpan() noexcept(false) {
   end();
 }
 
 void JsSpan::end() {
+  // Destroy the scope first to restore the frame, then close the span.
+  // (Also the natural order if both are kj::none already — no-op.)
+  userScope = kj::none;
   span = kj::none;
 }
 
@@ -30,11 +36,16 @@ void JsSpan::setAttribute(
 jsg::Ref<JsSpan> TracingModule::startSpan(jsg::Lock& js, kj::String name) {
   KJ_IF_SOME(ioContext, IoContext::tryCurrent()) {
     TraceContext traceContext = ioContext.makeUserTraceSpan(kj::ConstString(kj::mv(name)));
+
+    // Push this span's user SpanParent into the async context frame so that child spans
+    // created while this span is active will inherit it as their parent.
+    auto userScope = ioContext.pushUserTraceSpan(js, traceContext.getUserSpanParent());
+
     auto ownedSpan = ioContext.addObject(kj::heap(kj::mv(traceContext)));
-    return js.alloc<JsSpan>(kj::mv(ownedSpan));
+    return js.alloc<JsSpan>(kj::mv(ownedSpan), kj::mv(userScope));
   } else {
     // When no IoContext is available, create a no-op span
-    return js.alloc<JsSpan>(kj::none);
+    return js.alloc<JsSpan>(kj::none, kj::none);
   }
 }
 

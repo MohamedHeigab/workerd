@@ -2,21 +2,16 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-// This test exercises the getCurrentUserTraceSpan() fallback path introduced by the
-// otel-async-context-frame changes.
+// This test exercises user trace span nesting via getCurrentUserTraceSpan().
 //
-// When the JS lock is held but userTraceAsyncContextKey has not been seeded in the async
-// context frame (because enterContext() has not been implemented yet), makeUserTraceSpan()
-// falls through to the IncomingRequest-level root user span.  The consequence is that ALL
-// user spans are flat siblings under the root — there is no nesting.
+// startSpan() pushes the new span's user SpanParent into userTraceAsyncContextKey in the
+// async context frame.  While that span is active, any nested makeUserTraceSpan() call
+// (e.g. from a fetch subrequest) picks up the pushed value as its parent, producing
+// proper span nesting.
 //
-// The test creates an explicit user span via withSpan() and makes a fetch subrequest
-// INSIDE that span's lifetime.  Both the explicit span and the fetch span should appear as
-// siblings under the root (flat), NOT with the fetch nested under the explicit span.
-//
-// When enterContext() is implemented (Phase 0b), the fetch span should become a child of
-// the explicit span.  This test documents the current pre-enterContext() behavior and will
-// need updating when Phase 0b lands.
+// The test creates an explicit user span via withSpan('outer-op', ...) and makes a fetch
+// subrequest INSIDE that span's lifetime.  The streaming tail worker verifies that the
+// fetch span is a CHILD of outer-op (not a sibling).
 
 import assert from 'node:assert';
 

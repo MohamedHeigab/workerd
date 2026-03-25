@@ -8,10 +8,17 @@
 
 namespace workerd::api {
 
-// JavaScript-accessible span class that manages span ownership through IoContext
+// JavaScript-accessible span class that manages span ownership through IoContext.
+//
+// When a JsSpan is created, it pushes its user-facing SpanParent into the async context
+// frame (via userTraceAsyncContextKey).  Any child spans created while this span is active
+// will pick up the pushed value as their parent via getCurrentUserTraceSpan(), giving
+// proper span nesting.  When end() is called (or the destructor runs), the frame is
+// restored to its previous value.
 class JsSpan: public jsg::Object {
  public:
-  JsSpan(kj::Maybe<IoOwn<TraceContext>> span);
+  JsSpan(kj::Maybe<IoOwn<TraceContext>> span,
+      kj::Maybe<kj::Own<jsg::AsyncContextFrame::StorageScope>> userScope);
   ~JsSpan() noexcept(false);
 
   // Ends the span, marking its completion. Once ended, the span cannot be modified.
@@ -33,7 +40,11 @@ class JsSpan: public jsg::Object {
   }
 
  private:
+  // The StorageScope must be destroyed BEFORE the span — restoring the frame's user span
+  // to its previous value before the SpanBuilder is closed.  Destruction of members happens
+  // in reverse declaration order, so userScope (declared second) is destroyed first.
   kj::Maybe<IoOwn<TraceContext>> span;
+  kj::Maybe<kj::Own<jsg::AsyncContextFrame::StorageScope>> userScope;
 };
 
 // Module that provides tracing capabilities for Workers.

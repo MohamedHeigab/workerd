@@ -892,6 +892,12 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   SpanParent getCurrentTraceSpan();
   SpanParent getCurrentUserTraceSpan();
 
+  // Pushes the given user SpanParent into userTraceAsyncContextKey in the current async context
+  // frame.  Returns a heap-allocated StorageScope that restores the previous value when destroyed.
+  // This is used by startSpan() to make nested user spans visible to getCurrentUserTraceSpan().
+  kj::Own<jsg::AsyncContextFrame::StorageScope> pushUserTraceSpan(
+      jsg::Lock& js, SpanParent userSpan);
+
   tracing::InvocationSpanContext& getInvocationSpanContext() {
     return getCurrentIncomingRequest().getInvocationSpanContext();
   }
