@@ -2396,7 +2396,6 @@ jsg::AsyncContextFrame::StorageKey& Worker::Lock::getUserTraceAsyncContextKey() 
   return *(isolate.userTraceAsyncContextKey);
 }
 
-
 bool Worker::Lock::isInspectorEnabled() {
   return worker.script->isolate->impl->inspector != kj::none;
 }

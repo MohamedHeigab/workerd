@@ -1131,7 +1131,9 @@ SpanParent IoContext::getCurrentUserTraceSpan() {
     }
   }
 
-  // No JS lock — fall back to the flat IncomingRequest-level root span.
+  // Fall back to the flat IncomingRequest-level root span.  We get here when the JS lock is
+  // not held (no async context frame to inspect) or when enterContext() has not yet been called
+  // for this request (key absent from the frame).
   if (incomingRequests.empty()) {
     return SpanParent(nullptr);
   } else {

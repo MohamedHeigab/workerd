@@ -1,0 +1,29 @@
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "user-trace-span-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "user-trace-span-test.js"),
+        ],
+        compatibilityFlags = ["experimental", "nodejs_compat"],
+        streamingTails = ["tail"],
+        bindings = [
+          (name = "SELF", service = "user-trace-span-test"),
+          # Wrapped binding to access startSpan/withSpan from the tracing module.
+          (name = "tracing", wrapped = (moduleName = "cloudflare-internal:test-tracing-wrapper")),
+        ],
+      ),
+    ),
+    # Streaming tail worker that collects span events and verifies them.
+    ( name = "tail", worker = .tailWorker ),
+  ],
+);
+
+const tailWorker :Workerd.Worker = (
+  modules = [
+    (name = "worker", esModule = embed "user-trace-span-test-tail.js"),
+  ],
+  compatibilityFlags = ["experimental", "nodejs_compat"],
+);

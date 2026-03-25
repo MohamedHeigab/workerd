@@ -776,7 +776,6 @@ class Worker::Lock {
   // Get the opaque storage key to use for recording user trace information in async contexts.
   jsg::AsyncContextFrame::StorageKey& getUserTraceAsyncContextKey();
 
-
  private:
   explicit Lock(const Worker& worker, LockType lockType, jsg::V8StackScope&);
   struct Impl;

@@ -821,3 +821,12 @@ wd_test(
     src = "htmlrewriter-transform-cancel-test.wd-test",
     data = ["htmlrewriter-transform-cancel-test.js"],
 )
+
+wd_test(
+    src = "user-trace-span-test.wd-test",
+    args = ["--experimental"],
+    data = [
+        "user-trace-span-test.js",
+        "user-trace-span-test-tail.js",
+    ],
+)
