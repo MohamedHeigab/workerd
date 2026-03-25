@@ -309,10 +309,6 @@ void SpanContext::toCapnp(rpc::SpanContext::Builder writer) const {
   }
 }
 
-SpanContext SpanContext::clone() const {
-  return SpanContext(traceId, spanId);
-}
-
 kj::String KJ_STRINGIFY(const SpanContext& context) {
   return kj::str(context.getTraceId(), "-", context.getSpanId());
 }

@@ -290,7 +290,9 @@ struct SpanContext {
 
   static SpanContext fromCapnp(rpc::SpanContext::Reader reader);
   void toCapnp(rpc::SpanContext::Builder writer) const;
-  SpanContext clone() const;
+  static SpanContext clone(const SpanContext& ctx) {
+    return SpanContext(ctx.traceId, ctx.spanId);
+  }
 
  private:
   TraceId traceId;

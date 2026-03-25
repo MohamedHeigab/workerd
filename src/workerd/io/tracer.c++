@@ -369,13 +369,17 @@ void WorkerTracer::setEventInfoInternal(
       .entrypoint = mapCopyString(trace->entrypoint),
     };
 
+    tracing::SpanId parentSpanId = tracing::SpanId::nullId;
+    KJ_IF_SOME(trigger, context.getParent()) {
+      parentSpanId = trigger.getSpanId();
+    }
     // Onset needs special handling for spanId: The top-level spanId is zero unless a trigger
-    // context is available (not yet implemented). The inner spanId is taken from the invocation
+    // context is available. The inner spanId is taken from the invocation
     // span context, that span is being "opened" with the onset event. All other tail events have it
     // as its parent span ID, except for recursive SpanOpens (which have the parent span instead)
     // and Attribute/SpanClose events (which have the spanId opened in the corresponding SpanOpen).
     auto onsetContext = tracing::InvocationSpanContext(
-        context.getTraceId(), context.getInvocationId(), tracing::SpanId::nullId);
+        context.getTraceId(), context.getInvocationId(), parentSpanId);
 
     // Not applying size accounting for Onset since it is sent separately
     writer->report(onsetContext,

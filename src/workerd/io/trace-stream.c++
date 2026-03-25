@@ -1076,8 +1076,8 @@ bool TailStreamWriter::reportImpl(TailEvent&& event, size_t sizeHint) {
       // event indicating how many events were dropped if applicable.
       if (event.event.is<Outcome>() && active->droppedEvents > 0) {
         StreamDiagnosticsEvent diag(active->droppedEvents);
-        TailEvent diagTailEvent(event.spanContext.clone(), event.invocationId, event.timestamp,
-            event.sequence, kj::mv(diag));
+        TailEvent diagTailEvent(SpanContext::clone(event.spanContext), event.invocationId,
+            event.timestamp, event.sequence, kj::mv(diag));
         active->queue.push(kj::mv(diagTailEvent));
         // Increment the outcome sequence number to keep things consistent.
         event.sequence++;
