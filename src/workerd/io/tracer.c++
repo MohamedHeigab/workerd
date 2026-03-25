@@ -631,4 +631,8 @@ kj::Date UserSpanObserver::getTime() {
   return IoContext::current().now();
 }
 
+tracing::SpanId UserSpanObserver::getSpanId() {
+  return spanId;
+}
+
 }  // namespace workerd

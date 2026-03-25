@@ -1008,11 +1008,17 @@ kj::Own<WorkerInterface> IoContext::getSubrequestChannelImpl(uint channel,
     kj::Maybe<kj::String> cfBlobJson,
     TraceContext& tracing,
     IoChannelFactory& channelFactory) {
-  auto& invCtx = getInvocationSpanContext();
+  const auto& invCtx = getInvocationSpanContext();
+  auto traceId = invCtx.getTraceId();
+  auto spanId = invCtx.getSpanId();
+  KJ_IF_SOME(observer, tracing.getUserSpanParent().getObserver()) {
+    auto& userObs = kj::downcast<UserSpanObserver>(observer);
+    spanId = userObs.getSpanId();
+  }
   IoChannelFactory::SubrequestMetadata metadata{
     .cfBlobJson = kj::mv(cfBlobJson),
     .parentSpan = tracing.getInternalSpanParent(),
-    .userSpanContext = tracing::SpanContext(invCtx.getTraceId(), invCtx.getSpanId()),
+    .userSpanContext = tracing::SpanContext(traceId, spanId),
     .featureFlagsForFl = mapCopyString(worker->getIsolate().getFeatureFlagsForFl()),
   };
 

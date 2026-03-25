@@ -223,6 +223,7 @@ class UserSpanObserver final: public SpanObserver {
   void report(const Span& span) override;
   void reportStart(kj::ConstString operationName, kj::Date startTime) override;
   kj::Date getTime() override;
+  tracing::SpanId getSpanId();
 
  private:
   kj::Own<SpanSubmitter> submitter;
