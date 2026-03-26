@@ -2403,6 +2403,7 @@ interface Queue<Body = unknown> {
     messages: Iterable<MessageSendRequest<Body>>,
     options?: QueueSendBatchOptions,
   ): Promise<void>;
+  metrics(): Promise<QueueMetrics>;
 }
 interface QueueSendOptions {
   contentType?: QueueContentType;
@@ -2415,6 +2416,11 @@ interface MessageSendRequest<Body = unknown> {
   body: Body;
   contentType?: QueueContentType;
   delaySeconds?: number;
+}
+interface QueueMetrics {
+  backlogCount: number;
+  backlogBytes: number;
+  oldestMessageTimestamp: number;
 }
 interface QueueRetryBatch {
   retry: boolean;

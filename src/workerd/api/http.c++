@@ -1677,12 +1677,6 @@ jsg::Promise<jsg::Ref<Response>> fetchImplNoOutputLock(jsg::Lock& js,
         headers.setPtr(kj::HttpHeaderId::CONTENT_LENGTH, "0"_kj);
       }
 
-      KJ_IF_SOME(ctx, traceContext) {
-        KJ_IF_SOME(cfRay, headers.get(headerIds.cfRay)) {
-          ctx.setTag("cloudflare.ray_id"_kjc, cfRay);
-        }
-      }
-
       nativeRequest = client->request(jsRequest->getMethodEnum(), url, headers, maybeLength);
       auto& nr = KJ_ASSERT_NONNULL(nativeRequest);
       auto stream = newSystemStream(kj::mv(nr.body), StreamEncoding::IDENTITY);
@@ -1733,6 +1727,10 @@ jsg::Promise<jsg::Ref<Response>> fetchImplNoOutputLock(jsg::Lock& js,
         ctx.setTag("http.response.status_code"_kjc, static_cast<int64_t>(response.statusCode));
         KJ_IF_SOME(length, response.body->tryGetLength()) {
           ctx.setTag("http.response.body.size"_kjc, static_cast<int64_t>(length));
+        }
+        auto headerIds = IoContext::current().getHeaderIds();
+        KJ_IF_SOME(cfRay, response.headers->get(headerIds.cfRay)) {
+          ctx.setTag("cloudflare.ray_id"_kjc, cfRay);
         }
       }
       return handleHttpResponse(
