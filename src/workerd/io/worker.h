@@ -758,11 +758,17 @@ class Worker::Lock {
   //
   // If running in an actor, the name and props are ignored and the entrypoint originally used to
   // construct the actor is returned.
+  //
+  // `isDynamicDispatch` indicates the entrypoint name was supplied at request time (e.g. by the
+  // Workflows engine via dynamic dispatch) rather than baked into the pipeline at config time. When
+  // true, a missing entrypoint is surfaced as a JSG TypeError to the caller rather than being
+  // logged as an internal error, since the mismatch is attributable to user configuration.
   kj::Maybe<kj::Own<api::ExportedHandler>> getExportedHandler(
       kj::Maybe<kj::StringPtr> entrypointName,
       kj::Maybe<VersionInfo> versionInfo,
       Frankenvalue props,
-      kj::Maybe<Worker::Actor&> actor);
+      kj::Maybe<Worker::Actor&> actor,
+      bool isDynamicDispatch = false);
 
   // Get the C++ object representing the global scope.
   api::ServiceWorkerGlobalScope& getGlobalScope();

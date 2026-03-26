@@ -635,7 +635,8 @@ class TraceCustomEvent final: public WorkerInterface::CustomEvent {
       kj::Maybe<kj::StringPtr> entrypointName,
       kj::Maybe<Worker::VersionInfo> versionInfo,
       Frankenvalue props,
-      kj::TaskSet& waitUntilTasks) override;
+      kj::TaskSet& waitUntilTasks,
+      bool isDynamicDispatch) override;
 
   kj::Promise<Result> sendRpc(capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
       capnp::ByteStreamFactory& byteStreamFactory,

@@ -131,7 +131,8 @@ class WorkerInterface: public kj::HttpService {
         kj::Maybe<kj::StringPtr> entrypointName,
         kj::Maybe<Worker_VersionInfo> versionInfo,
         Frankenvalue props,
-        kj::TaskSet& waitUntilTasks) = 0;
+        kj::TaskSet& waitUntilTasks,
+        bool isDynamicDispatch = false) = 0;
 
     // Forward the event over RPC.
     virtual kj::Promise<Result> sendRpc(capnp::HttpOverCapnpFactory& httpOverCapnpFactory,

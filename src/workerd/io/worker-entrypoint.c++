@@ -60,7 +60,8 @@ class WorkerEntrypoint final: public WorkerInterface {
       kj::Maybe<kj::Own<BaseTracer>> workerTracer,
       kj::Maybe<kj::String> cfBlobJson,
       kj::Maybe<Worker::VersionInfo> versionInfo,
-      kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan);
+      kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan,
+      bool isDynamicDispatch);
 
   kj::Promise<void> request(kj::HttpMethod method,
       kj::StringPtr url,
@@ -87,6 +88,7 @@ class WorkerEntrypoint final: public WorkerInterface {
   kj::TaskSet& waitUntilTasks;
   kj::Maybe<kj::Own<IoContext::IncomingRequest>> incomingRequest;
   bool tunnelExceptions;
+  bool isDynamicDispatch;
   kj::Maybe<kj::StringPtr> entrypointName;
   Frankenvalue props;
   kj::Maybe<kj::String> cfBlobJson;
@@ -122,6 +124,7 @@ class WorkerEntrypoint final: public WorkerInterface {
       ThreadContext& threadContext,
       kj::TaskSet& waitUntilTasks,
       bool tunnelExceptions,
+      bool isDynamicDispatch,
       kj::Maybe<kj::StringPtr> entrypointName,
       Frankenvalue props,
       kj::Maybe<kj::String> cfBlobJson,
@@ -179,12 +182,13 @@ kj::Own<WorkerInterface> WorkerEntrypoint::construct(ThreadContext& threadContex
     kj::Maybe<kj::Own<BaseTracer>> workerTracer,
     kj::Maybe<kj::String> cfBlobJson,
     kj::Maybe<Worker::VersionInfo> versionInfo,
-    kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan) {
+    kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan,
+    bool isDynamicDispatch) {
   TRACE_EVENT("workerd", "WorkerEntrypoint::construct()");
 
-  auto obj =
-      kj::heap<WorkerEntrypoint>(kj::Badge<WorkerEntrypoint>(), threadContext, waitUntilTasks,
-          tunnelExceptions, entrypointName, kj::mv(props), kj::mv(cfBlobJson), kj::mv(versionInfo));
+  auto obj = kj::heap<WorkerEntrypoint>(kj::Badge<WorkerEntrypoint>(), threadContext,
+      waitUntilTasks, tunnelExceptions, isDynamicDispatch, entrypointName, kj::mv(props),
+      kj::mv(cfBlobJson), kj::mv(versionInfo));
   obj->init(kj::mv(worker), kj::mv(actor), kj::mv(limitEnforcer), kj::mv(ioContextDependency),
       kj::mv(ioChannelFactory), kj::addRef(*metrics), kj::mv(workerTracer),
       kj::mv(maybeTriggerInvocationSpan));
@@ -196,6 +200,7 @@ WorkerEntrypoint::WorkerEntrypoint(kj::Badge<WorkerEntrypoint> badge,
     ThreadContext& threadContext,
     kj::TaskSet& waitUntilTasks,
     bool tunnelExceptions,
+    bool isDynamicDispatch,
     kj::Maybe<kj::StringPtr> entrypointName,
     Frankenvalue props,
     kj::Maybe<kj::String> cfBlobJson,
@@ -203,6 +208,7 @@ WorkerEntrypoint::WorkerEntrypoint(kj::Badge<WorkerEntrypoint> badge,
     : threadContext(threadContext),
       waitUntilTasks(waitUntilTasks),
       tunnelExceptions(tunnelExceptions),
+      isDynamicDispatch(isDynamicDispatch),
       entrypointName(entrypointName),
       props(kj::mv(props)),
       cfBlobJson(kj::mv(cfBlobJson)),
@@ -352,8 +358,8 @@ kj::Promise<void> WorkerEntrypoint::request(kj::HttpMethod method,
 
     return lock.getGlobalScope().request(method, url, headers, requestBody, wrappedResponse,
         cfBlobJson, lock,
-        lock.getExportedHandler(
-            entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor()),
+        lock.getExportedHandler(entrypointName, kj::mv(versionInfo), kj::mv(props),
+            context.getActor(), isDynamicDispatch),
         kj::mv(signal));
   })
       .then([this, &context, &wrappedResponse = *wrappedResponse, workerTracer](
@@ -587,8 +593,8 @@ kj::Promise<void> WorkerEntrypoint::connect(kj::StringPtr host,
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
 
     return lock.getGlobalScope().connect(kj::mv(host), headers, connection, response, lock,
-        lock.getExportedHandler(
-            entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor()));
+        lock.getExportedHandler(entrypointName, kj::mv(versionInfo), kj::mv(props),
+            context.getActor(), isDynamicDispatch));
   })
       .then([&context, workerTracer]() {
     KJ_IF_SOME(t, workerTracer) {
@@ -919,7 +925,7 @@ kj::Promise<WorkerInterface::CustomEvent::Result> WorkerEntrypoint::customEvent(
 
   auto promise = event
                      ->run(kj::mv(incomingRequest), entrypointName, kj::mv(versionInfo),
-                         kj::mv(props), waitUntilTasks)
+                         kj::mv(props), waitUntilTasks, isDynamicDispatch)
                      .attach(kj::mv(event));
 
   // TODO(cleanup): In theory `context` may have been destroyed by now if `event->run()` dropped
@@ -981,12 +987,13 @@ kj::Own<WorkerInterface> newWorkerEntrypoint(ThreadContext& threadContext,
     kj::Maybe<kj::Own<BaseTracer>> workerTracer,
     kj::Maybe<kj::String> cfBlobJson,
     kj::Maybe<Worker::VersionInfo> versionInfo,
-    kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan) {
+    kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan,
+    bool isDynamicDispatch) {
   return WorkerEntrypoint::construct(threadContext, kj::mv(worker), kj::mv(entrypointName),
       kj::mv(props), kj::mv(actor), kj::mv(limitEnforcer), kj::mv(ioContextDependency),
       kj::mv(ioChannelFactory), kj::mv(metrics), waitUntilTasks, tunnelExceptions,
       kj::mv(workerTracer), kj::mv(cfBlobJson), kj::mv(versionInfo),
-      kj::mv(maybeTriggerInvocationSpan));
+      kj::mv(maybeTriggerInvocationSpan), isDynamicDispatch);
 }
 
 }  // namespace workerd

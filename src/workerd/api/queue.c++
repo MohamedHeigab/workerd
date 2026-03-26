@@ -801,7 +801,8 @@ kj::Promise<WorkerInterface::CustomEvent::Result> QueueCustomEvent::run(
     kj::Maybe<kj::StringPtr> entrypointName,
     kj::Maybe<Worker::VersionInfo> versionInfo,
     Frankenvalue props,
-    kj::TaskSet& waitUntilTasks) {
+    kj::TaskSet& waitUntilTasks,
+    bool isDynamicDispatch) {
   // This method has three main chunks of logic:
   // 1. Do all necessary setup work. This starts right below this comment.
   // 2. Call into the worker's queue event handler.
@@ -822,14 +823,14 @@ kj::Promise<WorkerInterface::CustomEvent::Result> QueueCustomEvent::run(
   auto runProm = context.run(
       [this, entrypointName = entrypointName, &context, queueEvent = kj::addRef(*queueEventHolder),
           &metrics = incomingRequest->getMetrics(), versionInfo = kj::mv(versionInfo),
-          props = kj::mv(props)](Worker::Lock& lock) mutable {
+          props = kj::mv(props), isDynamicDispatch](Worker::Lock& lock) mutable {
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
 
     auto& typeHandler = lock.getWorker().getIsolate().getApi().getQueueTypeHandler(lock);
     auto startResp = startQueueEvent(lock.getGlobalScope(), context, kj::mv(params),
         context.addObject(result), lock,
-        lock.getExportedHandler(
-            entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor()),
+        lock.getExportedHandler(entrypointName, kj::mv(versionInfo), kj::mv(props),
+            context.getActor(), isDynamicDispatch),
         typeHandler);
     queueEvent->event = kj::mv(startResp.event);
     queueEvent->exportedHandlerProm = kj::mv(startResp.exportedHandlerProm);

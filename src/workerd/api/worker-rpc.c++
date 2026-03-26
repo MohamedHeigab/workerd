@@ -1982,7 +1982,8 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
       kj::Maybe<Worker::VersionInfo> versionInfo,
       Frankenvalue props,
       kj::Maybe<kj::String> wrapperModule,
-      kj::Maybe<kj::Own<BaseTracer>> tracer)
+      kj::Maybe<kj::Own<BaseTracer>> tracer,
+      bool isDynamicDispatch)
       : JsRpcTargetBase(ioCtx, CantOutliveIncomingRequest()),
         ioCtx(ioCtx),
         // Most of the time we don't really have to clone this but it's hard to fully prove, so
@@ -1991,7 +1992,8 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
         versionInfo(kj::mv(versionInfo)),
         props(kj::mv(props)),
         wrapperModule(kj::mv(wrapperModule)),
-        tracer(kj::mv(tracer)) {}
+        tracer(kj::mv(tracer)),
+        isDynamicDispatch(isDynamicDispatch) {}
 
   // Override call() to emit the Return event when the top-level RPC call completes.
   // This marks when the handler returned a value, NOT when all data has been streamed or all
@@ -2008,7 +2010,7 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
     jsg::Lock& js = lock;
 
     auto handler = KJ_REQUIRE_NONNULL(lock.getExportedHandler(entrypointName, kj::mv(versionInfo),
-                                          kj::mv(props), ioCtx.getActor()),
+                                          kj::mv(props), ioCtx.getActor(), isDynamicDispatch),
         "Failed to get handler to worker.");
 
     if (handler->missingSuperclass && wrapperModule == kj::none) {
@@ -2077,6 +2079,7 @@ class EntrypointJsRpcTarget final: public JsRpcTargetBase {
   Frankenvalue props;
   kj::Maybe<kj::String> wrapperModule;
   kj::Maybe<kj::Own<BaseTracer>> tracer;
+  bool isDynamicDispatch;
 
   bool isReservedName(kj::StringPtr name) override {
     if (  // "fetch" and "connect" are treated specially on entrypoints.
@@ -2165,7 +2168,8 @@ kj::Promise<WorkerInterface::CustomEvent::Result> JsRpcSessionCustomEvent::run(
     kj::Maybe<kj::StringPtr> entrypointName,
     kj::Maybe<Worker::VersionInfo> versionInfo,
     Frankenvalue props,
-    kj::TaskSet& waitUntilTasks) {
+    kj::TaskSet& waitUntilTasks,
+    bool isDynamicDispatch) {
   IoContext& ioctx = incomingRequest->getContext();
 
   incomingRequest->delivered();
@@ -2177,7 +2181,7 @@ kj::Promise<WorkerInterface::CustomEvent::Result> JsRpcSessionCustomEvent::run(
   });
 
   EntrypointJsRpcTarget target(ioctx, entrypointName, kj::mv(versionInfo), kj::mv(props),
-      kj::mv(wrapperModule), mapAddRef(incomingRequest->getWorkerTracer()));
+      kj::mv(wrapperModule), mapAddRef(incomingRequest->getWorkerTracer()), isDynamicDispatch);
   capnp::RevocableServer<rpc::JsRpcTarget> revcableTarget(target);
 
   try {

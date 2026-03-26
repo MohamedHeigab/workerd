@@ -620,12 +620,14 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server {
       kj::Maybe<kj::StringPtr> entrypointNamePtr,
       kj::Maybe<Worker::VersionInfo> versionInfo,
       Frankenvalue props,
-      kj::Own<kj::PromiseFulfiller<void>> doneFulfiller)
+      kj::Own<kj::PromiseFulfiller<void>> doneFulfiller,
+      bool isDynamicDispatch)
       : weakIoContext(ioContext.getWeakRef()),
         entrypointNamePtr(kj::mv(entrypointNamePtr)),
         versionInfo(kj::mv(versionInfo)),
         props(kj::mv(props)),
-        doneFulfiller(kj::mv(doneFulfiller)) {}
+        doneFulfiller(kj::mv(doneFulfiller)),
+        isDynamicDispatch(isDynamicDispatch) {}
 
   KJ_DISALLOW_COPY_AND_MOVE(TailStreamTarget);
   ~TailStreamTarget() {
@@ -735,9 +737,10 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server {
         events.size() == 1 && events[0].event.is<Onset>(), "Expected only a single onset event");
     auto& event = events[0];
 
-    auto handler = KJ_REQUIRE_NONNULL(lock.getExportedHandler(entrypointNamePtr,
-                                          kj::mv(versionInfo), kj::mv(props), ioContext.getActor()),
-        "Failed to get handler to worker.");
+    auto handler =
+        KJ_REQUIRE_NONNULL(lock.getExportedHandler(entrypointNamePtr, kj::mv(versionInfo),
+                               kj::mv(props), ioContext.getActor(), isDynamicDispatch),
+            "Failed to get handler to worker.");
     StringCache stringCache;
 
     jsg::Lock& js = lock;
@@ -934,6 +937,7 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server {
   // or rejected if the capability is dropped before receiving the outcome
   // event.
   kj::Own<kj::PromiseFulfiller<void>> doneFulfiller;
+  bool isDynamicDispatch;
 
   // The maybeHandler will be empty until we receive and process the
   // onset event.
@@ -954,13 +958,14 @@ kj::Promise<WorkerInterface::CustomEvent::Result> TailStreamCustomEvent::run(
     kj::Maybe<kj::StringPtr> entrypointName,
     kj::Maybe<Worker::VersionInfo> versionInfo,
     Frankenvalue props,
-    kj::TaskSet& waitUntilTasks) {
+    kj::TaskSet& waitUntilTasks,
+    bool isDynamicDispatch) {
   IoContext& ioContext = incomingRequest->getContext();
   incomingRequest->delivered();
 
   auto [donePromise, doneFulfiller] = kj::newPromiseAndFulfiller<void>();
   capFulfiller->fulfill(kj::heap<TailStreamTarget>(ioContext, kj::mv(entrypointName),
-      kj::mv(versionInfo), kj::mv(props), kj::mv(doneFulfiller)));
+      kj::mv(versionInfo), kj::mv(props), kj::mv(doneFulfiller), isDynamicDispatch));
 
   donePromise = donePromise.attach(ioContext.registerPendingEvent());
 

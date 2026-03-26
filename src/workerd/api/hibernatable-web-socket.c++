@@ -62,7 +62,8 @@ kj::Promise<WorkerInterface::CustomEvent::Result> HibernatableWebSocketCustomEve
     kj::Maybe<kj::StringPtr> entrypointName,
     kj::Maybe<Worker::VersionInfo> versionInfo,
     Frankenvalue props,
-    kj::TaskSet& waitUntilTasks) {
+    kj::TaskSet& waitUntilTasks,
+    bool isDynamicDispatch) {
   // Mark the request as delivered because we're about to run some JS.
   auto& context = incomingRequest->getContext();
   incomingRequest->delivered();
@@ -83,33 +84,34 @@ kj::Promise<WorkerInterface::CustomEvent::Result> HibernatableWebSocketCustomEve
   try {
     co_await context.run(
         [entrypointName = entrypointName, &context, eventParameters = kj::mv(eventParameters),
-            versionInfo = kj::mv(versionInfo), props = kj::mv(props)](Worker::Lock& lock) mutable {
+            versionInfo = kj::mv(versionInfo), props = kj::mv(props),
+            isDynamicDispatch](Worker::Lock& lock) mutable {
       KJ_SWITCH_ONEOF(eventParameters.eventType) {
         KJ_CASE_ONEOF(text, HibernatableSocketParams::Text) {
           return lock.getGlobalScope().sendHibernatableWebSocketMessage(context,
               kj::mv(text.message), eventParameters.eventTimeoutMs,
               kj::mv(eventParameters.websocketId), lock,
-              lock.getExportedHandler(
-                  entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor()));
+              lock.getExportedHandler(entrypointName, kj::mv(versionInfo), kj::mv(props),
+                  context.getActor(), isDynamicDispatch));
         }
         KJ_CASE_ONEOF(data, HibernatableSocketParams::Data) {
           return lock.getGlobalScope().sendHibernatableWebSocketMessage(context,
               kj::mv(data.message), eventParameters.eventTimeoutMs,
               kj::mv(eventParameters.websocketId), lock,
-              lock.getExportedHandler(
-                  entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor()));
+              lock.getExportedHandler(entrypointName, kj::mv(versionInfo), kj::mv(props),
+                  context.getActor(), isDynamicDispatch));
         }
         KJ_CASE_ONEOF(close, HibernatableSocketParams::Close) {
           return lock.getGlobalScope().sendHibernatableWebSocketClose(context, kj::mv(close),
               eventParameters.eventTimeoutMs, kj::mv(eventParameters.websocketId), lock,
-              lock.getExportedHandler(
-                  entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor()));
+              lock.getExportedHandler(entrypointName, kj::mv(versionInfo), kj::mv(props),
+                  context.getActor(), isDynamicDispatch));
         }
         KJ_CASE_ONEOF(e, HibernatableSocketParams::Error) {
           return lock.getGlobalScope().sendHibernatableWebSocketError(context, kj::mv(e.error),
               eventParameters.eventTimeoutMs, kj::mv(eventParameters.websocketId), lock,
-              lock.getExportedHandler(
-                  entrypointName, kj::mv(versionInfo), kj::mv(props), context.getActor()));
+              lock.getExportedHandler(entrypointName, kj::mv(versionInfo), kj::mv(props),
+                  context.getActor(), isDynamicDispatch));
         }
         KJ_UNREACHABLE;
       }
