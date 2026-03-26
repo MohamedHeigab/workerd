@@ -23,9 +23,9 @@ constexpr bool isAlphanumericString(kj::StringPtr s) {
   return true;
 }
 
-constexpr bool isPrintableAsciiString(kj::StringPtr s) {
+constexpr bool hasNoControlCharacters(kj::StringPtr s) {
   for (auto c: s) {
-    if (c < 0x20 || c > 0x7E) return false;
+    if (static_cast<kj::byte>(c) < 0x20) return false;
   }
   return true;
 }
@@ -103,10 +103,8 @@ void Container::start(jsg::Lock& js, jsg::Optional<StartupOptions> maybeOptions)
           "Label names must contain only alphanumeric characters (A-Z, a-z, 0-9) "
           "at index ",
           i);
-      JSG_REQUIRE(isPrintableAsciiString(field.value), Error,
-          "Label values must contain only printable ASCII characters "
-          "at index ",
-          i);
+      JSG_REQUIRE(hasNoControlCharacters(field.value), Error,
+          "Label values cannot contain control characters (index ", i, ")");
       list[i].setName(field.name);
       list[i].setValue(field.value);
     }

@@ -393,21 +393,16 @@ export class DurableObjectExample extends DurableObject {
 
     // Control character in label value
     assert.throws(() => container.start({ labels: { name: 'bad\x01value' } }), {
-      message: /Label values must contain only printable ASCII characters/,
+      message: /Label values cannot contain control characters/,
     });
 
-    // Emoji in label value
-    assert.throws(() => container.start({ labels: { name: 'value🚀' } }), {
-      message: /Label values must contain only printable ASCII characters/,
-    });
-
-    // Valid alphanumeric names with printable ASCII values
+    // Test that valid alphanumeric labels work
     container.start({
       labels: {
         MyLabel123: 'any-value_is.fine!',
-        abc: 'hello world',
-        TEST: 'us-east-1',
-        team: 'v1.2.3',
+        abc: 'hello world 🎉',
+        TEST: 'café-value',
+        team: 'workers',
       },
     });
 
