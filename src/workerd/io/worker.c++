@@ -2365,7 +2365,16 @@ kj::Maybe<kj::Own<api::ExportedHandler>> Worker::Lock::getExportedHandler(
     return kj::none;
   } else {
     if (worker.impl->actorClasses.find(n) != kj::none) {
-      LOG_ERROR_PERIODICALLY("worker is not an actor but class name was requested", n);
+      if (isDynamicDispatch) {
+        JSG_FAIL_REQUIRE(TypeError, "The entrypoint name ", n,
+            " refers to a Durable Object class, but the incoming request is trying to invoke it as"
+            " a stateless worker.");
+      } else {
+        LOG_ERROR_PERIODICALLY("worker is not an actor but class name was requested", n);
+      }
+    } else if (isDynamicDispatch) {
+      JSG_FAIL_REQUIRE(TypeError, "The entrypoint name ", n,
+          " was not found in this worker. Ensure the worker exports an entrypoint with that name.");
     } else {
       LOG_ERROR_PERIODICALLY("worker has no such named entrypoint", n);
     }
