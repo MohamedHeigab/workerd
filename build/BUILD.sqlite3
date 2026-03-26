@@ -61,7 +61,9 @@ genrule(
         # lemon requires lempar.c to be in the current working
         # directory, and parse.y has to be in a writable directory
         # since the output files are created adjacent to it.
-        "cp $(SRCS) . " +
+        # Use -f to overwrite if lempar.c already exists in the working
+        # directory.
+        "cp -f $(SRCS) . " +
 
         # Creates parse.c and parse.h
         "&& $(execpath :lemon) {} parse.y ".format(SQLITE_DEFINES_FOR_LEMON) +
@@ -94,7 +96,7 @@ genrule(
     ],
     cmd = (
         # Same as :parse_ch
-        "cp $(SRCS) . " +
+        "cp -f $(SRCS) . " +
         "&& $(execpath :lemon) {} fts5parse.y ".format(SQLITE_DEFINES_FOR_LEMON) +
         # Bazel expects genrule outputs to be in RULEDIR
         "&& cp fts5parse.h fts5parse.c $(RULEDIR)"
