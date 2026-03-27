@@ -570,15 +570,19 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
         // operation, the output gate may also appear broken as a secondary side-effect. Treat it
         // as a user error so retries count against the limit and the alarm is eventually deleted.
         auto isInputGateBrokenByUser = jsg::isExceptionFromInputGateBroken(description);
+        // Special case: a jsg.Error from a recognised broken context (outputGateBroken,
+        // exceededCpu, exceededMemory) or with no broken prefix means the exception was generated
+        // by user code. Count it against the limit regardless of whether the output gate is broken.
+        auto isJsgError = jsg::isExceptionJsgError(description);
         auto shouldRetryCountsAgainstLimits =
-            !context.isOutputGateBroken() || isInputGateBrokenByUser;
+            !context.isOutputGateBroken() || isInputGateBrokenByUser || isJsgError;
 
         // We want to alert if we aren't going to count this alarm retry against limits.
-        // Skip logging when the output gate broke as a secondary effect of a user throw inside
-        // blockConcurrencyWhile: that is expected behaviour and already counted as a user error.
-        if (!isInputGateBrokenByUser && log && context.isOutputGateBroken()) {
+        // Skip logging when the output gate broke as a secondary effect of a user-generated error:
+        // that is expected behaviour and already counted as a user error.
+        if (!(isInputGateBrokenByUser || isJsgError) && log && context.isOutputGateBroken()) {
           LOG_NOSENTRY(ERROR, "output lock broke during alarm execution", actorId, description);
-        } else if (!isInputGateBrokenByUser && context.isOutputGateBroken()) {
+        } else if (!(isInputGateBrokenByUser || isJsgError) && context.isOutputGateBroken()) {
           if (isUserError) {
             // The handler failed because the user overloaded the object. It's their fault, we'll not
             // retry forever.
@@ -618,10 +622,14 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
           // operation, the output gate also appears broken as a secondary side-effect. Treat it
           // as a user error so retries count against the limit and the alarm is eventually deleted.
           auto isInputGateBrokenByUser = jsg::isExceptionFromInputGateBroken(e.getDescription());
-          auto shouldRetryCountsAgainstLimits = isInputGateBrokenByUser;
+          // Special case: a jsg.Error from a recognised broken context (outputGateBroken,
+          // exceededCpu, exceededMemory) or with no broken prefix means the exception was generated
+          // by user code. Count it against the limit regardless of whether the output gate is broken.
+          auto isJsgError = jsg::isExceptionJsgError(e.getDescription());
+          auto shouldRetryCountsAgainstLimits = isInputGateBrokenByUser || isJsgError;
           if (auto desc = e.getDescription();
               !jsg::isTunneledException(desc) && !jsg::isDoNotLogException(desc)) {
-            if (!isInputGateBrokenByUser) {
+            if (!(isInputGateBrokenByUser || isJsgError)) {
               if (isInterestingException(e)) {
                 LOG_EXCEPTION("alarmOutputLock"_kj, e);
               } else {
