@@ -199,6 +199,15 @@ wd_test(
     ],
 )
 
+# Tests for SQL_RESTRICT_RESERVED_NAMES autogate - only runs in @all-autogates variant
+wd_test(
+    src = "sql-restrict-names-test.wd-test",
+    args = ["--experimental"],
+    data = ["sql-restrict-names-test.js"],
+    generate_all_compat_flags_variant = False,
+    generate_default_variant = False,
+)
+
 wd_test(
     src = "sync-kv-test.wd-test",
     args = ["--experimental"],

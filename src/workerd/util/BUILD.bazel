@@ -204,6 +204,7 @@ wd_cc_library(
         "sqlite-metadata.h",
     ],
     implementation_deps = [
+        ":autogate",
         "//src/workerd/jsg:exception",
         "@sqlite3",
     ],

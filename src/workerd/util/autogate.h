@@ -39,6 +39,8 @@ enum class AutogateKey {
   ENABLE_FAST_TEXTENCODER,
   // Enable draining read on standard streams
   ENABLE_DRAINING_READ_ON_STANDARD_STREAMS,
+  // Make SqlStorage::isAllowedName case-insensitive and enforce it on virtual tables (FTS5).
+  SQL_RESTRICT_RESERVED_NAMES,
   NumOfKeys  // Reserved for iteration.
 };
 

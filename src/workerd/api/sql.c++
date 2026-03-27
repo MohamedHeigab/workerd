@@ -7,6 +7,9 @@
 #include "actor-state.h"
 
 #include <workerd/io/io-context.h>
+#include <workerd/util/autogate.h>
+
+#include <strings.h>
 
 namespace workerd::api {
 
@@ -135,6 +138,9 @@ double SqlStorage::getDatabaseSize(jsg::Lock& js) {
 }
 
 bool SqlStorage::isAllowedName(kj::StringPtr name) const {
+  if (util::Autogate::isEnabled(util::AutogateKey::SQL_RESTRICT_RESERVED_NAMES)) {
+    return strncasecmp(name.begin(), "_cf_", 4) != 0;
+  }
   return !name.startsWith("_cf_");
 }
 
