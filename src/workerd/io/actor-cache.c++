@@ -2709,8 +2709,10 @@ kj::Promise<void> ActorCache::flushImpl(uint retryCount) {
         LOG_NOSENTRY(ERROR, "actor cache flush failed", e);
       }
       // Pass through exception type to convey appropriate retry behavior.
+      // Use jsg-internal.Error so this internal platform failure is not mistaken for a
+      // user-generated jsg.Error when classifying alarm retries.
       return kj::Exception(e.getType(), __FILE__, __LINE__,
-          kj::str("broken.outputGateBroken; jsg.Error: Internal error in Durable "
+          kj::str("broken.outputGateBroken; jsg-internal.Error: Internal error in Durable "
                   "Object storage write caused object to be reset."));
     }
   });
@@ -3105,9 +3107,11 @@ kj::Promise<void> ActorCache::flushImplDeleteAll(uint retryCount) {
         LOG_NOSENTRY(ERROR, "actorCacheDeleteAll failed", e);
       }
       // Pass through exception type to convey appropriate retry behavior.
+      // Use jsg-internal.Error so this internal platform failure is not mistaken for a
+      // user-generated jsg.Error when classifying alarm retries.
       return kj::Exception(e.getType(), __FILE__, __LINE__,
-          kj::str(
-              "broken.outputGateBroken; jsg.Error: Internal error in Durable Object storage deleteAll() caused object to be reset."));
+          kj::str("broken.outputGateBroken; jsg-internal.Error: Internal error in Durable Object "
+                  "storage deleteAll() caused object to be reset."));
     }
   });
 }

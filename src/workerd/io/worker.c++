@@ -3653,8 +3653,11 @@ struct Worker::Actor::Impl {
       auto timeout = 30 * kj::SECONDS;
       co_await timerChannel.afterLimitTimeout(timeout);
 
+      // jsg-internal.Error is used instead of jsg.Error so that isExceptionJsgError() does not
+      // misclassify this internal platform timeout as a user-generated error when deciding alarm
+      // retry limits.
       kj::throwFatalException(KJ_EXCEPTION(OVERLOADED,
-          "broken.outputGateBroken; jsg.Error: Durable Object storage operation exceeded "
+          "broken.outputGateBroken; jsg-internal.Error: Durable Object storage operation exceeded "
           "timeout which caused object to be reset."));
     }
 
