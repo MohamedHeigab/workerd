@@ -157,6 +157,11 @@ kj::String annotateBroken(kj::StringPtr internalMessage, kj::StringPtr brokennes
 // blockConcurrencyWhile. Handles any leading "remote." prefixes transparently.
 bool isExceptionFromInputGateBroken(kj::StringPtr description);
 
+// Returns true if the exception is a jsg.Error in one of these specific forms (after stripping
+// any "remote." prefixes): plain jsg.Error, or jsg.Error inside a broken.outputGateBroken,
+// broken.exceededCpu, or broken.exceededMemory annotation. Other broken prefixes are excluded.
+bool isExceptionJsgError(kj::StringPtr description);
+
 constexpr kj::Exception::DetailTypeId EXCEPTION_IS_USER_ERROR = 0x82aff7d637c30e47ull;
 
 struct ExceptionToJsOptions {

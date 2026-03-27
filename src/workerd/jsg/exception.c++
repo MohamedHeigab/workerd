@@ -171,4 +171,23 @@ bool isExceptionFromInputGateBroken(kj::StringPtr description) {
   return stripRemoteExceptionPrefix(description).startsWith("broken.inputGateBroken; "_kj);
 }
 
+bool isExceptionJsgError(kj::StringPtr description) {
+  // Strip leading "remote exception: " (KJ RPC tunneling) and "remote." (annotateBroken) prefixes.
+  description = stripRemoteExceptionPrefix(description);
+  while (description.startsWith("remote."_kj)) {
+    description = description.slice("remote."_kj.size());
+  }
+  // Strip one of the broken prefixes we know should count against retry limits when paired with a
+  // jsg.Error. Other broken prefixes (inputGateBroken, updated, dropped, ...) are excluded because
+  // we either don't want them to count, or they are handled separately elsewhere.
+  for (auto prefix:
+      {"broken.outputGateBroken; "_kj, "broken.exceededCpu; "_kj, "broken.exceededMemory; "_kj}) {
+    if (description.startsWith(prefix)) {
+      description = description.slice(prefix.size());
+      break;
+    }
+  }
+  return description.startsWith("jsg.Error:"_kj);
+}
+
 }  // namespace workerd::jsg
