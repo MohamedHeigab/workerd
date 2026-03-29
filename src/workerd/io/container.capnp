@@ -90,6 +90,38 @@ interface Container @0x9aaceefc06523bca {
     # Optional human-friendly name. Empty string means not set.
   }
 
+  struct ExecOptions {
+    env @0 :List(Text);
+    # Environment variables to add/override for the exec'd process, in NAME=VALUE format.
+
+    workingDirectory @1 :Text;
+    # Working directory for the exec'd process. Empty string means use the container default.
+
+    user @2 :Text;
+    # User for the exec'd process. Empty string means use the container default.
+
+    combinedOutput @3 :Bool;
+    # If true, stderr is combined into stdout. If stdout is not set, combined output is discarded.
+  }
+
+  struct Process {
+    pid @0 :Int32;
+    handle @1 :ProcessHandle;
+  }
+
+  interface ProcessHandle {
+    wait @0 () -> (exitCode :Int32);
+    # Waits for the process to exit and returns its exit code.
+
+    stdin @1 () -> (stdin :ByteStream);
+    # Retrieves a ByteStream handle to write to the process's stdin.
+    # If not called before wait(), stdin automatically EOFs.
+    # Throws an error if called after wait() has been called.
+
+    kill @2 (signo :UInt32);
+    # Sends the given signal to the process.
+  }
+
   monitor @2 () -> (exitCode: Int32);
   # Waits for the container to shut down.
   #
@@ -181,4 +213,11 @@ interface Container @0x9aaceefc06523bca {
 
   snapshotDirectory @10 SnapshotDirectoryParams -> (snapshot :DirectorySnapshot);
   # Creates a snapshot for a directory in the running container.
+
+  exec @11 (cmd :List(Text), stdout :ByteStream, stderr :ByteStream, params :ExecOptions)
+      -> (process :Process);
+  # Executes a short-lived process in the running container.
+  #
+  # If stdout/stderr are not provided, output is discarded. If params.combinedOutput is true,
+  # stderr is merged into stdout and the stderr capability is ignored.
 }
