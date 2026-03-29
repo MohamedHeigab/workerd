@@ -11,8 +11,8 @@
 #include <workerd/io/features.h>
 #include <workerd/io/io-context.h>
 
-#include <kj/filesystem.h>
 #include <capnp/compat/byte-stream.h>
+#include <kj/filesystem.h>
 
 #include <cmath>
 
@@ -151,12 +151,15 @@ jsg::MemoizedIdentity<jsg::Promise<int>>& ExecProcess::getExitCode(jsg::Lock& js
 }
 
 jsg::Promise<jsg::Ref<ExecOutput>> ExecProcess::output(jsg::Lock& js) {
+  JSG_REQUIRE(!outputCalled, TypeError, "output() can only be called once.");
+  outputCalled = true;
+
   auto stdoutPromise = js.resolvedPromise(emptyByteArray());
   KJ_IF_SOME(stream, stdout) {
     JSG_REQUIRE(!stream->isDisturbed(), TypeError,
         "Cannot call output() after stdout has started being consumed.");
     stdoutPromise = stream->getController()
-                        .readAllBytes(js, kj::maxValue)
+                        .readAllBytes(js, IoContext::current().getLimitEnforcer().getBufferingLimit())
                         .then(js, [](jsg::Lock&, jsg::BufferSource bytes) {
       return kj::heapArray(bytes.asArrayPtr());
     });
@@ -495,8 +498,8 @@ jsg::Promise<jsg::Ref<ExecProcess>> Container::exec(
         }
         // user sets "pipe"... they want to consume the API with the stdin WritableStream
         KJ_CASE_ONEOF(mode, kj::String) {
-          JSG_REQUIRE(mode == "pipe", TypeError,
-              "stdin must be a ReadableStream or the string \"pipe\".");
+          JSG_REQUIRE(
+              mode == "pipe", TypeError, "stdin must be a ReadableStream or the string \"pipe\".");
           auto sink = newSystemStream(kj::mv(stdinWriter), StreamEncoding::IDENTITY, ioContext);
           auto writable = js.alloc<WritableStream>(ioContext, kj::mv(sink),
               ioContext.getMetrics().tryCreateWritableByteStreamObserver());

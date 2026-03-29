@@ -12,16 +12,6 @@
 #include <workerd/io/io-own.h>
 #include <workerd/jsg/jsg.h>
 
-#ifdef stdin
-#undef stdin
-#endif
-#ifdef stdout
-#undef stdout
-#endif
-#ifdef stderr
-#undef stderr
-#endif
-
 namespace workerd::api {
 
 class Fetcher;
@@ -136,6 +126,7 @@ class ExecProcess: public jsg::Object {
   kj::Maybe<jsg::MemoizedIdentity<jsg::Promise<int>>> exitCodePromise;
   kj::Maybe<jsg::Promise<void>> exitCodePromiseCopy;
   kj::Maybe<int> resolvedExitCode;
+  bool outputCalled = false;
 
   void visitForGc(jsg::GcVisitor& visitor) {
     visitor.visit(stdin, stdout, stderr, exitCodePromise, exitCodePromiseCopy);

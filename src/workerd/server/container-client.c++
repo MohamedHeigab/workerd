@@ -11,6 +11,7 @@
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/url.h>
 #include <workerd/server/docker-api.capnp.h>
+#include <workerd/util/stream-utils.h>
 #include <workerd/util/strings.h>
 #include <workerd/util/uuid.h>
 
@@ -26,6 +27,8 @@
 #include <kj/encoding.h>
 #include <kj/exception.h>
 #include <kj/string.h>
+
+#include <limits>
 
 namespace workerd::server {
 
@@ -86,6 +89,154 @@ struct DockerResponse {
 struct DockerBinaryResponse {
   kj::uint statusCode;
   kj::Array<kj::byte> body;
+};
+
+struct DockerStreamedResponse {
+  kj::uint statusCode;
+  kj::String statusText;
+  kj::Own<kj::AsyncIoStream> connection;
+};
+
+// Really similar to BufferedInputStreamWrapper, but Async...
+// We need this because of Docker's exec keeping a bidirectional connection
+// needing to own the IoStream after writing and reading headers, as it does
+// "Upgrade: tcp".
+class BufferedAsyncIoStream final: public kj::AsyncIoStream {
+ public:
+  BufferedAsyncIoStream(kj::Own<kj::AsyncIoStream> inner, kj::Array<kj::byte> buffered)
+      : inner(kj::mv(inner)),
+        buffered(kj::mv(buffered)) {}
+
+  kj::Promise<size_t> tryRead(void* dst, size_t minBytes, size_t maxBytes) override {
+    KJ_REQUIRE(minBytes <= maxBytes, minBytes, maxBytes);
+
+    auto out = kj::arrayPtr(reinterpret_cast<kj::byte*>(dst), maxBytes);
+    size_t copied = 0;
+
+    auto bufferedRemaining = buffered.size() - bufferedOffset;
+    if (bufferedRemaining > 0) {
+      auto toCopy = kj::min(maxBytes, bufferedRemaining);
+      out.first(toCopy).copyFrom(buffered.asPtr().slice(bufferedOffset, bufferedOffset + toCopy));
+      bufferedOffset += toCopy;
+      copied = toCopy;
+
+      if (copied >= minBytes || copied == maxBytes) {
+        co_return copied;
+      }
+    }
+
+    auto read = co_await inner->tryRead(out.begin() + copied, minBytes - copied, maxBytes - copied);
+    co_return copied + read;
+  }
+
+  kj::Maybe<uint64_t> tryGetLength() override {
+    KJ_IF_SOME(innerLength, inner->tryGetLength()) {
+      return innerLength + (buffered.size() - bufferedOffset);
+    }
+    return kj::none;
+  }
+
+  kj::Promise<uint64_t> pumpTo(kj::AsyncOutputStream& output, uint64_t amount) override {
+    uint64_t pumped = 0;
+    auto bufferedRemaining = buffered.size() - bufferedOffset;
+    if (bufferedRemaining > 0) {
+      auto toWrite = static_cast<size_t>(kj::min(amount, static_cast<uint64_t>(bufferedRemaining)));
+      co_await output.write(buffered.asPtr().slice(bufferedOffset, bufferedOffset + toWrite));
+      bufferedOffset += toWrite;
+      pumped += toWrite;
+
+      if (pumped == amount) {
+        co_return pumped;
+      }
+    }
+
+    co_return pumped + co_await inner->pumpTo(output, amount - pumped);
+  }
+
+  kj::Promise<void> write(kj::ArrayPtr<const byte> buffer) override {
+    return inner->write(buffer);
+  }
+  kj::Promise<void> write(kj::ArrayPtr<const kj::ArrayPtr<const byte>> pieces) override {
+    return inner->write(pieces);
+  }
+  kj::Maybe<kj::Promise<uint64_t>> tryPumpFrom(
+      kj::AsyncInputStream& input, uint64_t amount = kj::maxValue) override {
+    return inner->tryPumpFrom(input, amount);
+  }
+  kj::Promise<void> whenWriteDisconnected() override {
+    return inner->whenWriteDisconnected();
+  }
+  void abortWrite(kj::Exception&& exception) override {
+    inner->abortWrite(kj::mv(exception));
+  }
+
+  void shutdownWrite() override {
+    inner->shutdownWrite();
+  }
+  void abortRead() override {
+    inner->abortRead();
+  }
+  void getsockopt(int level, int option, void* value, kj::uint* length) override {
+    inner->getsockopt(level, option, value, length);
+  }
+  void setsockopt(int level, int option, const void* value, kj::uint length) override {
+    inner->setsockopt(level, option, value, length);
+  }
+  void getsockname(struct sockaddr* addr, kj::uint* length) override {
+    inner->getsockname(addr, length);
+  }
+  void getpeername(struct sockaddr* addr, kj::uint* length) override {
+    inner->getpeername(addr, length);
+  }
+  kj::Maybe<int> getFd() const override {
+    return inner->getFd();
+  }
+
+ private:
+  kj::Own<kj::AsyncIoStream> inner;
+  kj::Array<kj::byte> buffered;
+  size_t bufferedOffset = 0;
+};
+
+// Docker exec uses a single hijacked stream for stdin and stdout/stderr. Keep that stream in a
+// small refcounted holder so the returned stdin ByteStream and the output demux task can share it.
+class SharedExecConnection final: public kj::Refcounted {
+ public:
+  explicit SharedExecConnection(kj::Own<kj::AsyncIoStream> connection)
+      : connection(kj::mv(connection)) {}
+
+  kj::Own<kj::AsyncIoStream> connection;
+  bool stdinOpened = false;
+  bool stdinClosed = false;
+};
+
+class DockerExecStdinStream final: public capnp::ExplicitEndOutputStream {
+ public:
+  explicit DockerExecStdinStream(kj::Own<SharedExecConnection> sharedConnection)
+      : sharedConnection(kj::mv(sharedConnection)) {}
+
+  kj::Promise<void> write(kj::ArrayPtr<const byte> buffer) override {
+    return sharedConnection->connection->write(buffer);
+  }
+
+  kj::Promise<void> write(kj::ArrayPtr<const kj::ArrayPtr<const byte>> pieces) override {
+    return sharedConnection->connection->write(pieces);
+  }
+
+  kj::Promise<void> whenWriteDisconnected() override {
+    return sharedConnection->connection->whenWriteDisconnected();
+  }
+
+  kj::Promise<void> end() override {
+    if (!sharedConnection->stdinClosed) {
+      sharedConnection->connection->shutdownWrite();
+      sharedConnection->stdinClosed = true;
+    }
+    return kj::READY_NOW;
+  }
+
+ private:
+  kj::Own<SharedExecConnection> sharedConnection;
 };
 
 // Strips a port suffix from a string, returning the host and port separately.
@@ -456,6 +607,191 @@ kj::Promise<void> removeContainer(
   }
 }
 
+kj::Maybe<size_t> tryFindHttpHeaderEnd(kj::ArrayPtr<const kj::byte> bytes) {
+  for (auto i: kj::zeroTo(bytes.size())) {
+    if (i + 4 > bytes.size()) {
+      return kj::none;
+    }
+    if (bytes[i] == '\r' && bytes[i + 1] == '\n' && bytes[i + 2] == '\r' && bytes[i + 3] == '\n') {
+      return i;
+    }
+  }
+  return kj::none;
+}
+
+// readDockerStreamedResponse is necessary because Docker streamed responses
+// require an open bidirectional stream after the response headers have been read.
+kj::Promise<DockerStreamedResponse> readDockerStreamedResponse(
+    kj::Own<kj::AsyncIoStream> connection) {
+  kj::Vector<kj::byte> buffer;
+  auto& input = *connection;
+
+  while (true) {
+    KJ_IF_SOME(headerEnd, tryFindHttpHeaderEnd(buffer.asPtr())) {
+      auto parsedHeaders = kj::heapArray<char>(headerEnd + 2);
+      for (auto i: kj::zeroTo(parsedHeaders.size())) {
+        parsedHeaders[i] = static_cast<char>(buffer[i]);
+      }
+
+      kj::HttpHeaderTable headerTable;
+      kj::HttpHeaders headers(headerTable);
+      auto parsedResponse = headers.tryParseResponse(parsedHeaders.asPtr());
+      headers.takeOwnership(kj::mv(parsedHeaders));
+
+      kj::uint statusCode = 0;
+      kj::String statusText;
+      KJ_SWITCH_ONEOF(parsedResponse) {
+        KJ_CASE_ONEOF(response, kj::HttpHeaders::Response) {
+          statusCode = response.statusCode;
+          statusText = kj::str(response.statusText);
+        }
+        KJ_CASE_ONEOF(protocolError, kj::HttpHeaders::ProtocolError) {
+          KJ_FAIL_REQUIRE("Docker streamed response returned malformed HTTP headers: ",
+              protocolError.statusMessage, ": ", protocolError.description);
+        }
+      }
+
+      auto bodyOffset = headerEnd + 4;
+      auto prefetchedBytes = kj::heapArray(buffer.asPtr().slice(bodyOffset));
+      kj::Own<kj::AsyncIoStream> prefixedConnection = kj::mv(connection);
+      if (prefetchedBytes.size() > 0) {
+        prefixedConnection =
+            kj::heap<BufferedAsyncIoStream>(kj::mv(prefixedConnection), kj::mv(prefetchedBytes));
+      }
+      co_return DockerStreamedResponse{
+        .statusCode = statusCode,
+        .statusText = kj::mv(statusText),
+        .connection = kj::mv(prefixedConnection),
+      };
+    }
+
+    auto scratch = kj::heapArray<kj::byte>(4096);
+    auto amount = co_await input.tryRead(scratch.begin(), 1, scratch.size());
+    KJ_REQUIRE(amount > 0, "EOF while waiting for Docker streamed response headers");
+    buffer.addAll(scratch.first(amount));
+    KJ_REQUIRE(buffer.size() <= 65536, "Docker streamed response headers exceeded 64KiB");
+  }
+}
+
+kj::Promise<DockerStreamedResponse> dockerApiStreamedRequest(kj::Network& network,
+    kj::String dockerPath,
+    kj::HttpMethod method,
+    kj::String endpoint,
+    const kj::HttpHeaders& headers,
+    kj::Maybe<kj::ArrayPtr<const kj::byte>> body = kj::none) {
+  auto address = co_await network.parseAddress(dockerPath);
+  auto connection = co_await address->connect();
+
+  auto requestHeaders = headers.serializeRequest(method, endpoint);
+  KJ_IF_SOME(requestBody, body) {
+    kj::ArrayPtr<const kj::byte> pieces[] = {requestHeaders.asBytes(), requestBody};
+    co_await connection->write(kj::arrayPtr(pieces));
+  } else {
+    co_await connection->write(requestHeaders.asBytes());
+  }
+
+  co_return co_await readDockerStreamedResponse(kj::mv(connection));
+}
+
+uint32_t parseDockerFrameLength(kj::ArrayPtr<const kj::byte> frameHeader) {
+  KJ_REQUIRE(frameHeader.size() >= 8, "Docker raw stream header too short");
+  return (static_cast<uint32_t>(frameHeader[4]) << 24) |
+      (static_cast<uint32_t>(frameHeader[5]) << 16) | (static_cast<uint32_t>(frameHeader[6]) << 8) |
+      static_cast<uint32_t>(frameHeader[7]);
+}
+
+void detachEnd(kj::Maybe<kj::Own<capnp::ExplicitEndOutputStream>> stream) {
+  KJ_IF_SOME(s, stream) {
+    s->end().attach(kj::mv(s)).detach([](kj::Exception&&) {});
+  }
+}
+
+// demuxDockerExecOutput demuxes the input from Docker to passed stdout/stderr.
+kj::Promise<void> demuxDockerExecOutput(kj::AsyncInputStream& input,
+    kj::Maybe<kj::Own<capnp::ExplicitEndOutputStream>> stdout,
+    kj::Maybe<kj::Own<capnp::ExplicitEndOutputStream>> stderr,
+    bool combinedOutput) {
+  kj::Vector<kj::byte> buffer;
+  size_t offset = 0;
+
+  auto compactBuffer = [&]() {
+    if (offset == 0) {
+      return;
+    }
+
+    kj::Vector<kj::byte> compacted;
+    compacted.addAll(buffer.asPtr().slice(offset));
+    buffer = kj::mv(compacted);
+    offset = 0;
+  };
+
+  auto ensureBytes = [&](size_t count) -> kj::Promise<bool> {
+    while (buffer.size() - offset < count) {
+      compactBuffer();
+      auto scratch = kj::heapArray<kj::byte>(4096);
+      auto amount = co_await input.tryRead(scratch.begin(), 1, scratch.size());
+      if (amount == 0) {
+        co_return false;
+      }
+      buffer.addAll(scratch.first(amount));
+    }
+    co_return true;
+  };
+
+  try {
+    while (co_await ensureBytes(8)) {
+      auto frameHeader = buffer.asPtr().slice(offset, offset + 8);
+      auto streamId = frameHeader[0];
+      auto frameLength = parseDockerFrameLength(frameHeader);
+      KJ_REQUIRE(co_await ensureBytes(8 + frameLength),
+          "Docker exec raw stream ended in the middle of a frame");
+
+      auto payload = buffer.asPtr().slice(offset + 8, offset + 8 + frameLength);
+      if (streamId == 1) {
+        KJ_IF_SOME(out, stdout) {
+          co_await out->write(payload);
+        }
+      } else {
+        if (streamId == 2) {
+          if (combinedOutput) {
+            KJ_IF_SOME(out, stdout) {
+              co_await out->write(payload);
+            }
+          } else {
+            KJ_IF_SOME(err, stderr) {
+              co_await err->write(payload);
+            }
+          }
+        }
+      }
+
+      offset += 8 + frameLength;
+    }
+
+    if (buffer.size() != offset) {
+      KJ_FAIL_REQUIRE("Docker exec raw stream ended with a truncated frame header");
+    }
+
+    // We need to detach ourselves from the end() as the user might've
+    // decided to not read them altogether.
+    detachEnd(kj::mv(stdout));
+    detachEnd(kj::mv(stderr));
+  } catch (...) {
+    auto exception = kj::getCaughtExceptionAsKj();
+    if (exception.getType() == kj::Exception::Type::DISCONNECTED) {
+      co_return;
+    }
+
+    KJ_IF_SOME(out, stdout) {
+      out->abortWrite(kj::cp(exception));
+    }
+    KJ_IF_SOME(err, stderr) {
+      err->abortWrite(kj::cp(exception));
+    }
+    kj::throwFatalException(kj::mv(exception));
+  }
+}
+
 kj::String currentSnapshotVolumeTimestamp() {
   return kj::str((kj::systemPreciseCalendarClock().now() - kj::UNIX_EPOCH) / kj::SECONDS);
 }
@@ -691,6 +1027,93 @@ class ContainerClient::DockerPort final: public rpc::Container::Port::Server {
   kj::String containerHost;
   uint16_t containerPort;
   kj::Maybe<kj::Promise<void>> pumpTask;
+};
+
+class ContainerClient::DockerProcessHandle final: public rpc::Container::ProcessHandle::Server {
+ public:
+  DockerProcessHandle(ContainerClient& containerClient,
+      kj::String execId,
+      kj::Own<kj::AsyncIoStream> connection,
+      kj::Maybe<capnp::ByteStream::Client> stdout,
+      kj::Maybe<capnp::ByteStream::Client> stderr,
+      bool combinedOutput)
+      : containerClient(containerClient.addRef()),
+        execId(kj::mv(execId)),
+        sharedConnection(kj::refcounted<SharedExecConnection>(kj::mv(connection))) {
+    kj::Maybe<kj::Own<capnp::ExplicitEndOutputStream>> stdoutStream = kj::none;
+    KJ_IF_SOME(out, stdout) {
+      stdoutStream = this->containerClient->byteStreamFactory.capnpToKjExplicitEnd(out);
+    } else {
+      stdoutStream = capnp::ExplicitEndOutputStream::wrap(newNullOutputStream(), []() {});
+    }
+
+    kj::Maybe<kj::Own<capnp::ExplicitEndOutputStream>> stderrStream = kj::none;
+    KJ_IF_SOME(err, stderr) {
+      stderrStream = this->containerClient->byteStreamFactory.capnpToKjExplicitEnd(err);
+    } else if (!combinedOutput) {
+      stderrStream = capnp::ExplicitEndOutputStream::wrap(newNullOutputStream(), []() {});
+    }
+
+    // Always drain the Docker exec stream. This lets wait() use stream closure as the primary
+    // process-completion signal, even when stdout/stderr are ignored.
+    auto task = demuxDockerExecOutput(
+        *sharedConnection->connection, kj::mv(stdoutStream), kj::mv(stderrStream), combinedOutput)
+                    .attach(this->containerClient->addRef(), kj::addRef(*sharedConnection));
+    streamClosedTask = kj::mv(task).fork();
+  }
+
+  kj::Promise<void> wait(WaitContext context) override {
+    waitStarted = true;
+    if (!sharedConnection->stdinOpened && !sharedConnection->stdinClosed) {
+      sharedConnection->connection->shutdownWrite();
+      sharedConnection->stdinClosed = true;
+    }
+
+    co_await KJ_ASSERT_NONNULL(streamClosedTask).addBranch();
+
+    // Docker's exec-inspect state can lag slightly behind the hijacked stream closing, so after
+    // we observe EOF we allow a short bounded retry window to obtain the final exit code.
+    for (auto attempt: kj::zeroTo(20)) {
+      auto inspect = co_await containerClient->inspectExec(execId);
+      if (!inspect.running) {
+        context.getResults().setExitCode(inspect.exitCode);
+        co_return;
+      }
+
+      if (attempt + 1 < 20) {
+        co_await containerClient->timer.afterDelay(50 * kj::MILLISECONDS);
+      }
+    }
+
+    JSG_FAIL_REQUIRE(Error, "Docker exec stream closed before exit status became available.");
+  }
+
+  kj::Promise<void> stdin(StdinContext context) override {
+    JSG_REQUIRE(!waitStarted, Error, "Process stdin() cannot be called after wait().");
+    JSG_REQUIRE(!sharedConnection->stdinOpened, Error, "Process stdin() can only be called once.");
+
+    sharedConnection->stdinOpened = true;
+    context.getResults().setStdin(containerClient->byteStreamFactory.kjToCapnp(
+        kj::heap<DockerExecStdinStream>(kj::addRef(*sharedConnection))));
+    co_return;
+  }
+
+  kj::Promise<void> kill(KillContext context) override {
+    auto inspect = co_await containerClient->inspectExec(execId);
+    JSG_REQUIRE(inspect.pid > 0, Error, "Exec process does not have a visible pid to signal.");
+
+    auto signal = kj::str("-", signalToString(context.getParams().getSigno()));
+    auto pid = kj::str(inspect.pid);
+    auto cmd = kj::arr(kj::str("kill"), kj::mv(signal), kj::mv(pid));
+    co_await containerClient->runSimpleExec(cmd.asPtr());
+  }
+
+ private:
+  kj::Own<ContainerClient> containerClient;
+  kj::String execId;
+  kj::Own<SharedExecConnection> sharedConnection;
+  bool waitStarted = false;
+  kj::Maybe<kj::ForkedPromise<void>> streamClosedTask;
 };
 
 // HTTP service that handles HTTP CONNECT requests from the container sidecar (proxy-everything).
@@ -1222,6 +1645,152 @@ kj::Promise<void> ContainerClient::createContainer(
   }
 }
 
+kj::Promise<kj::String> ContainerClient::createExec(capnp::List<capnp::Text>::Reader cmd,
+    rpc::Container::ExecOptions::Reader params,
+    bool attachStdout,
+    bool attachStderr) {
+  capnp::JsonCodec codec;
+  codec.handleByAnnotation<docker_api::Docker::ExecCreateRequest>();
+
+  capnp::MallocMessageBuilder message;
+  auto request = message.initRoot<docker_api::Docker::ExecCreateRequest>();
+  request.setAttachStdin(true);
+  request.setAttachStdout(attachStdout);
+  request.setAttachStderr(attachStderr);
+  request.setTty(false);
+
+  auto jsonCmd = request.initCmd(cmd.size());
+  for (auto i: kj::zeroTo(cmd.size())) {
+    jsonCmd.set(i, cmd[i]);
+  }
+
+  if (params.hasEnv()) {
+    auto env = params.getEnv();
+    auto jsonEnv = request.initEnv(env.size());
+    for (auto i: kj::zeroTo(env.size())) {
+      jsonEnv.set(i, env[i]);
+    }
+  }
+
+  if (params.hasWorkingDirectory()) {
+    request.setWorkingDir(params.getWorkingDirectory());
+  }
+
+  if (params.hasUser()) {
+    request.setUser(params.getUser());
+  }
+
+  auto response = co_await dockerApiRequest(network, kj::str(dockerPath), kj::HttpMethod::POST,
+      kj::str("/containers/", containerName, "/exec"), codec.encode(request));
+  JSG_REQUIRE(response.statusCode == 201, Error, "Creating Docker exec failed with [",
+      response.statusCode, "] ", response.body);
+
+  auto parsed = decodeJsonResponse<docker_api::Docker::ExecCreateResponse>(response.body);
+  co_return kj::str(parsed->getRoot<docker_api::Docker::ExecCreateResponse>().getId());
+}
+
+kj::Promise<kj::Own<kj::AsyncIoStream>> ContainerClient::startExec(kj::String execId) {
+  capnp::JsonCodec codec;
+  codec.handleByAnnotation<docker_api::Docker::ExecStartRequest>();
+
+  capnp::MallocMessageBuilder message;
+  auto requestBody = message.initRoot<docker_api::Docker::ExecStartRequest>();
+  requestBody.setDetach(false);
+  requestBody.setTty(false);
+  auto encodedBody = codec.encode(requestBody);
+
+  // Exec attach uses HTTP connection hijacking. A plain POST can succeed with 200 OK but then not
+  // behave like the raw stream Docker's CLI expects, so we must request the upgrade explicitly.
+  kj::HttpHeaderTable headerTable;
+  kj::HttpHeaders headers(headerTable);
+  headers.setPtr(kj::HttpHeaderId::HOST, "localhost");
+  headers.setPtr(kj::HttpHeaderId::CONNECTION, "Upgrade");
+  // ... Why not CONNECT or WebSockets, Docker?
+  headers.setPtr(kj::HttpHeaderId::UPGRADE, "tcp");
+  headers.setPtr(kj::HttpHeaderId::CONTENT_TYPE, "application/json");
+  headers.set(kj::HttpHeaderId::CONTENT_LENGTH, kj::str(encodedBody.size()));
+  kj::ArrayPtr<const kj::byte> encodedBodyBytes = encodedBody.asBytes();
+
+  auto response = co_await dockerApiStreamedRequest(network, kj::str(dockerPath),
+      kj::HttpMethod::POST, kj::str("/exec/", execId, "/start"), headers, encodedBodyBytes);
+  if (response.statusCode != 101) {
+    auto errorBodyBytes = co_await response.connection->readAllBytes(MAX_JSON_RESPONSE_SIZE);
+    auto errorBody = kj::str(errorBodyBytes.asChars());
+    JSG_FAIL_REQUIRE(Error, "Starting Docker exec failed with [", response.statusCode, "] ",
+        response.statusText, " ", errorBody);
+  }
+
+  co_return kj::mv(response.connection);
+}
+
+kj::Promise<ContainerClient::ExecInspectResponse> ContainerClient::inspectExec(
+    kj::StringPtr execId) {
+  auto response = co_await dockerApiRequest(
+      network, kj::str(dockerPath), kj::HttpMethod::GET, kj::str("/exec/", execId, "/json"));
+  JSG_REQUIRE(response.statusCode == 200, Error, "Inspecting Docker exec failed with [",
+      response.statusCode, "] ", response.body);
+
+  auto parsed = decodeJsonResponse<docker_api::Docker::ExecInspectResponse>(response.body);
+  auto root = parsed->getRoot<docker_api::Docker::ExecInspectResponse>();
+  auto exitCodeValue = root.getExitCode();
+  auto exitCode = exitCodeValue.isNumber() ? static_cast<int32_t>(exitCodeValue.getNumber()) : 0;
+  co_return ExecInspectResponse{
+    .exitCode = exitCode,
+    .running = root.getRunning(),
+    .pid = root.getPid(),
+  };
+}
+
+kj::Promise<void> ContainerClient::runSimpleExec(kj::ArrayPtr<const kj::String> cmd) {
+  capnp::JsonCodec codec;
+  codec.handleByAnnotation<docker_api::Docker::ExecCreateRequest>();
+
+  capnp::MallocMessageBuilder createMessage;
+  auto createRequest = createMessage.initRoot<docker_api::Docker::ExecCreateRequest>();
+  createRequest.setAttachStdin(false);
+  createRequest.setAttachStdout(false);
+  createRequest.setAttachStderr(false);
+  createRequest.setTty(false);
+
+  auto jsonCmd = createRequest.initCmd(cmd.size());
+  for (auto i: kj::indices(cmd)) {
+    jsonCmd.set(i, cmd[i]);
+  }
+
+  auto createResponse =
+      co_await dockerApiRequest(network, kj::str(dockerPath), kj::HttpMethod::POST,
+          kj::str("/containers/", containerName, "/exec"), codec.encode(createRequest));
+  JSG_REQUIRE(createResponse.statusCode == 201, Error, "Creating helper Docker exec failed with [",
+      createResponse.statusCode, "] ", createResponse.body);
+
+  auto parsedCreate =
+      decodeJsonResponse<docker_api::Docker::ExecCreateResponse>(createResponse.body);
+  auto execId = kj::str(parsedCreate->getRoot<docker_api::Docker::ExecCreateResponse>().getId());
+
+  capnp::JsonCodec startCodec;
+  startCodec.handleByAnnotation<docker_api::Docker::ExecStartRequest>();
+
+  capnp::MallocMessageBuilder startMessage;
+  auto startRequest = startMessage.initRoot<docker_api::Docker::ExecStartRequest>();
+  startRequest.setDetach(true);
+  startRequest.setTty(false);
+
+  auto startResponse = co_await dockerApiRequest(network, kj::str(dockerPath), kj::HttpMethod::POST,
+      kj::str("/exec/", execId, "/start"), startCodec.encode(startRequest));
+  JSG_REQUIRE(startResponse.statusCode == 200, Error, "Starting helper Docker exec failed with [",
+      startResponse.statusCode, "] ", startResponse.body);
+
+  while (true) {
+    auto inspect = co_await inspectExec(execId);
+    if (!inspect.running) {
+      JSG_REQUIRE(inspect.exitCode == 0, Error, "Helper Docker exec failed with exit code ",
+          inspect.exitCode);
+      co_return;
+    }
+    co_await timer.afterDelay(50 * kj::MILLISECONDS);
+  }
+}
+
 kj::Promise<void> ContainerClient::startContainer() {
   auto endpoint = kj::str("/containers/", containerName, "/start");
   // We have to send an empty body since docker API will throw an error if we don't.
@@ -1628,6 +2197,52 @@ kj::Promise<void> ContainerClient::signal(SignalContext context) {
 
   const auto params = context.getParams();
   co_await killContainer(params.getSigno());
+}
+
+kj::Promise<void> ContainerClient::exec(ExecContext context) {
+  auto [ready, done] = getRpcTurn();
+  co_await ready;
+  KJ_DEFER(done->fulfill());
+
+  JSG_REQUIRE(containerStarted.load(std::memory_order_acquire), Error,
+      "exec() requires a running container.");
+
+  auto request = context.getParams();
+  auto execParams = request.getParams();
+  // Always attach stdout/stderr to Docker so the hijacked stream lifetime continues to track the
+  // process even when the JS API requested "ignore". We discard ignored output locally.
+  bool attachStdout = true;
+  bool attachStderr = true;
+
+  auto execId = co_await createExec(request.getCmd(), execParams, attachStdout, attachStderr);
+  kj::Own<kj::AsyncIoStream> execConnection = co_await startExec(kj::str(execId));
+  kj::Maybe<capnp::ByteStream::Client> stdout = kj::none;
+  if (request.hasStdout()) {
+    stdout = request.getStdout();
+  }
+
+  kj::Maybe<capnp::ByteStream::Client> stderr = kj::none;
+  if (request.hasStderr()) {
+    stderr = request.getStderr();
+  }
+
+  // Retrying is not great, however Docker's inspectExec might return running = false
+  // before it has fully spawned the process (as startExec() returns before
+  // even docker has spawned the process...)
+  ExecInspectResponse inspect{.exitCode = 0, .running = false, .pid = 0};
+  for (auto attempt: kj::zeroTo(20)) {
+    inspect = co_await inspectExec(execId);
+    if (inspect.pid != 0 || !inspect.running || attempt + 1 == 20) {
+      break;
+    }
+
+    co_await timer.afterDelay(50 * kj::MILLISECONDS);
+  }
+
+  auto process = context.getResults().initProcess();
+  process.setPid(static_cast<int32_t>(inspect.pid));
+  process.setHandle(kj::heap<DockerProcessHandle>(*this, kj::mv(execId), kj::mv(execConnection),
+      kj::mv(stdout), kj::mv(stderr), execParams.getCombinedOutput()));
 }
 
 kj::Promise<void> ContainerClient::setInactivityTimeout(SetInactivityTimeoutContext context) {

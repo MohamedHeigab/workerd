@@ -71,6 +71,7 @@ class ContainerClient final: public rpc::Container::Server, public kj::Refcounte
   kj::Promise<void> monitor(MonitorContext context) override;
   kj::Promise<void> destroy(DestroyContext context) override;
   kj::Promise<void> signal(SignalContext context) override;
+  kj::Promise<void> exec(ExecContext context) override;
   kj::Promise<void> getTcpPort(GetTcpPortContext context) override;
   kj::Promise<void> listenTcp(ListenTcpContext context) override;
   kj::Promise<void> setInactivityTimeout(SetInactivityTimeoutContext context) override;
@@ -109,6 +110,7 @@ class ContainerClient final: public rpc::Container::Server, public kj::Refcounte
 
   // Docker-specific Port implementation
   class DockerPort;
+  class DockerProcessHandle;
 
   // EgressHttpService handles CONNECT requests from proxy-anything sidecar
   friend class EgressHttpService;
@@ -132,6 +134,12 @@ class ContainerClient final: public rpc::Container::Server, public kj::Refcounte
     kj::String cloneVolume;
   };
 
+  struct ExecInspectResponse {
+    int32_t exitCode;
+    bool running;
+    uint32_t pid;
+  };
+
   kj::Promise<InspectResponse> inspectContainer();
 
   kj::Promise<void> updateSidecarEgressPort(uint16_t ingressHostPort, uint16_t egressPort);
@@ -140,6 +148,13 @@ class ContainerClient final: public rpc::Container::Server, public kj::Refcounte
       kj::Maybe<capnp::List<capnp::Text>::Reader> environment,
       kj::ArrayPtr<const SnapshotRestoreMount> restoreMounts,
       rpc::Container::StartParams::Reader params);
+  kj::Promise<kj::String> createExec(capnp::List<capnp::Text>::Reader cmd,
+      rpc::Container::ExecOptions::Reader params,
+      bool attachStdout,
+      bool attachStderr);
+  kj::Promise<kj::Own<kj::AsyncIoStream>> startExec(kj::String execId);
+  kj::Promise<ExecInspectResponse> inspectExec(kj::StringPtr execId);
+  kj::Promise<void> runSimpleExec(kj::ArrayPtr<const kj::String> cmd);
   kj::Promise<void> startContainer();
   kj::Promise<void> stopContainer();
   kj::Promise<void> killContainer(uint32_t signal);

@@ -96,6 +96,225 @@ export class DurableObjectExample extends DurableObject {
     assert.strictEqual(container.running, false);
   }
 
+  async testExec() {
+    const container = this.ctx.container;
+    if (container.running) {
+      const monitor = container.monitor().catch((_err) => {});
+      await container.destroy();
+      await monitor;
+    }
+
+    assert.strictEqual(container.running, false);
+
+    container.start({
+      env: { EXEC_BASE: 'from-start' },
+      enableInternet: true,
+    });
+
+    const monitor = container.monitor().catch((_err) => {});
+    const textEncoder = new TextEncoder();
+    const textDecoder = new TextDecoder();
+    const decode = (buffer) => textDecoder.decode(buffer);
+    const countStreamBytes = async (stream) => {
+      assert.ok(stream);
+
+      const reader = stream.getReader();
+      let total = 0;
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) {
+            return total;
+          }
+
+          total += value.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    };
+
+    await this.waitUntilContainerIsHealthy();
+
+    // 1. Read stdout directly as a stream.
+    {
+      const proc = await container.exec(['cat', '/etc/hostname']);
+      assert.ok(proc.pid > 0);
+      const stdout = await new Response(proc.stdout).text();
+      assert.ok(stdout.trim().length > 0);
+      assert.strictEqual(await proc.exitCode, 0);
+    }
+
+    // 2. Create a file from a ReadableStream stdin using tee.
+    {
+      const content = '{"hello":"world","kind":"stream"}\n';
+      const proc = await container.exec(['tee', '/tmp/exec-stream.json'], {
+        stdin: new ReadableStream({
+          start(controller) {
+            controller.enqueue(textEncoder.encode(content));
+            controller.close();
+          },
+        }),
+        stdout: 'ignore',
+      });
+      assert.strictEqual(await proc.exitCode, 0);
+
+      const verify = await (
+        await container.exec(['cat', '/tmp/exec-stream.json'])
+      ).output();
+
+      assert.strictEqual(decode(verify.stdout), content);
+      assert.strictEqual(verify.exitCode, 0);
+    }
+
+    // 3. Feed stdin interactively through the exposed WritableStream.
+    {
+      const proc = await container.exec(
+        ['sh', '-lc', 'cat > /tmp/exec-pipe.txt'],
+        {
+          stdin: 'pipe',
+          stdout: 'ignore',
+        }
+      );
+      assert.ok(proc.stdin);
+
+      const writer = proc.stdin.getWriter();
+      await writer.write(textEncoder.encode('alpha\n'));
+      await writer.write(textEncoder.encode('beta\n'));
+      await writer.close();
+
+      assert.strictEqual(await proc.exitCode, 0);
+
+      const verify = await (
+        await container.exec(['cat', '/tmp/exec-pipe.txt'])
+      ).output();
+      assert.strictEqual(decode(verify.stdout), 'alpha\nbeta\n');
+    }
+
+    // 4. Override working directory for commands that rely on relative paths.
+    {
+      const proc = await container.exec(['pwd'], { cwd: '/tmp' });
+      const output = await proc.output();
+      assert.strictEqual(decode(output.stdout).trim(), '/tmp');
+      assert.strictEqual(output.exitCode, 0);
+    }
+
+    // 5. Merge container env with per-exec overrides.
+    {
+      const proc = await container.exec(
+        ['sh', '-lc', 'printf "%s|%s" "$EXEC_BASE" "$EXEC_EXTRA"'],
+        {
+          env: {
+            EXEC_BASE: 'overridden',
+            EXEC_EXTRA: 'per-exec',
+          },
+        }
+      );
+      const output = await proc.output();
+      assert.strictEqual(decode(output.stdout), 'overridden|per-exec');
+      assert.strictEqual(output.exitCode, 0);
+    }
+
+    // 6. Capture stdout and stderr separately.
+    {
+      const proc = await container.exec([
+        'sh',
+        '-lc',
+        'printf "out"; printf "err" >&2',
+      ]);
+      const output = await proc.output();
+      assert.strictEqual(decode(output.stdout), 'out');
+      assert.strictEqual(decode(output.stderr), 'err');
+      assert.strictEqual(output.exitCode, 0);
+    }
+
+    // 7. Combine stderr into stdout for shell-style command output.
+    {
+      const proc = await container.exec(
+        ['sh', '-lc', 'printf "out"; printf "err" >&2'],
+        { stderr: 'combined' }
+      );
+      const output = await proc.output();
+      const stdout = decode(output.stdout);
+      if (stdout !== 'outerr') {
+        assert.strictEqual(decode(output.stdout), 'errout');
+      }
+
+      assert.strictEqual(decode(output.stderr), '');
+      assert.strictEqual(output.exitCode, 0);
+    }
+
+    // 8. Ignore stdout when only success/failure matters.
+    {
+      const proc = await container.exec(['sh', '-lc', 'printf "ignore-me"'], {
+        stdout: 'ignore',
+      });
+      const output = await proc.output();
+      assert.strictEqual(decode(output.stdout), '');
+      assert.strictEqual(decode(output.stderr), '');
+      assert.strictEqual(output.exitCode, 0);
+    }
+
+    // 9. Preserve stderr and non-zero exit codes for failures.
+    {
+      const proc = await container.exec([
+        'sh',
+        '-lc',
+        'printf "boom" >&2; exit 7',
+      ]);
+      const output = await proc.output();
+      assert.strictEqual(decode(output.stdout), '');
+      assert.strictEqual(decode(output.stderr), 'boom');
+      assert.strictEqual(output.exitCode, 7);
+    }
+
+    // 10. Stream-consume large stdout and stderr payloads concurrently without buffering them in
+    // JS memory.
+    {
+      const expectedBytes = 64 * 1024 * 1024;
+      const proc = await container.exec([
+        'sh',
+        '-lc',
+        `head -c ${expectedBytes} /dev/zero & head -c ${expectedBytes} /dev/zero >&2 & wait`,
+      ]);
+
+      const [stdoutBytes, stderrBytes, exitCode] = await Promise.all([
+        countStreamBytes(proc.stdout),
+        countStreamBytes(proc.stderr),
+        proc.exitCode,
+      ]);
+
+      assert.strictEqual(stdoutBytes, expectedBytes);
+      assert.strictEqual(stderrBytes, expectedBytes);
+      assert.strictEqual(exitCode, 0);
+    }
+
+    // 11. Check we throw an error when calling output() after reading from stdout
+    {
+      const proc = await container.exec(['echo', 'hello']);
+      await proc.stdout.getReader().read();
+      assert.throws(
+        () => {
+          proc.output();
+        },
+        {
+          name: 'TypeError',
+          message:
+            'Cannot call output() after stdout has started being consumed.',
+        }
+      );
+    }
+
+    // 12. Make sure Stdin EOF's by default if not set
+    {
+      await container.exec(['cat']).then((p) => p.output());
+    }
+
+    await container.destroy();
+    await monitor;
+    assert.strictEqual(container.running, false);
+  }
+
   async testSetInactivityTimeout(timeout) {
     const container = this.ctx.container;
     if (container.running) {
@@ -1577,6 +1796,17 @@ export const testBasics = {
       const stub = CONTAINER.get(id);
       await stub.testBasics();
     }
+  },
+};
+
+// Test a variety of common exec() workflows.
+export const testExec = {
+  async test(_ctrl, env) {
+    const id = env.MY_CONTAINER.idFromName(
+      getRandomDurableObjectName('testExec')
+    );
+    const stub = env.MY_CONTAINER.get(id);
+    await stub.testExec();
   },
 };
 
