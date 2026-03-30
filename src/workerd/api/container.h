@@ -121,8 +121,8 @@ class Container: public jsg::Object {
 
     JSG_METHOD(interceptOutboundHttp);
     JSG_METHOD(interceptAllOutboundHttp);
+    JSG_METHOD(interceptOutboundHttps);
     if (flags.getWorkerdExperimental()) {
-      JSG_METHOD(interceptOutboundHttps);
       JSG_METHOD(snapshotDirectory);
     }
   }

@@ -3788,6 +3788,7 @@ export interface Container {
   setInactivityTimeout(durationMs: number | bigint): Promise<void>;
   interceptOutboundHttp(addr: string, binding: Fetcher): Promise<void>;
   interceptAllOutboundHttp(binding: Fetcher): Promise<void>;
+  interceptOutboundHttps(addr: string, binding: Fetcher): Promise<void>;
 }
 export interface ContainerStartupOptions {
   entrypoint?: string[];
