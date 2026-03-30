@@ -17,6 +17,7 @@ jobs:
       - name: Build workerd for arm64
         run: |
           mkdir -p out
+          mkdir -p .bazel-cache
           docker buildx build --platform linux/arm64 -f Dockerfile.release --target artifact --output type=local,dest=out .
 
       - name: Rename binary
