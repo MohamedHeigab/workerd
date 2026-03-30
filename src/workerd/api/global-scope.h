@@ -228,6 +228,10 @@ class ExecutionContext: public jsg::Object {
     return props.getHandle(js);
   }
 
+  // Returns an optional cache object for CacheW-enabled workers.
+  // The default implementation returns undefined. Overridden via IoChannelFactory.
+  jsg::JsValue getCache(jsg::Lock& js);
+
   jsg::JsValue getVersion(jsg::Lock& js) {
     // TODO(soon): We should be able to assert for `version != kj::none` in the constructor when the
     //   `enable_version_api` compat flag is enabled, but currently dynamic workers and "reusable
@@ -246,6 +250,7 @@ class ExecutionContext: public jsg::Object {
       JSG_LAZY_INSTANCE_PROPERTY(exports, getExports);
     }
     JSG_LAZY_INSTANCE_PROPERTY(props, getProps);
+    JSG_LAZY_INSTANCE_PROPERTY(cache, getCache);
     if (flags.getEnableVersionApi()) {
       JSG_LAZY_INSTANCE_PROPERTY(version, getVersion);
     }

@@ -65,6 +65,15 @@ void ExecutionContext::passThroughOnException() {
   IoContext::current().setFailOpen();
 }
 
+jsg::JsValue ExecutionContext::getCache(jsg::Lock& js) {
+  // Hook for the embedding application (e.g. edgeworker) to provide a ctx.cache object.
+  // The default Worker::Api implementation returns undefined.
+  if (IoContext::hasCurrent()) {
+    return Worker::Isolate::from(js).getApi().getCtxCacheProperty(js);
+  }
+  return js.undefined();
+}
+
 void ExecutionContext::abort(jsg::Lock& js, jsg::Optional<jsg::Value> reason) {
   KJ_IF_SOME(r, reason) {
     IoContext::current().abort(js.exceptionToKj(kj::mv(r)));

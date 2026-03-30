@@ -663,6 +663,12 @@ class Worker::Api {
   virtual jsg::JsObject wrapExecutionContext(
       jsg::Lock& lock, jsg::Ref<api::ExecutionContext> ref) const = 0;
 
+  // Hook for the embedding application to provide a value for the ctx.cache property.
+  // The default implementation returns JS undefined.
+  virtual jsg::JsValue getCtxCacheProperty(jsg::Lock& js) const {
+    return js.undefined();
+  }
+
   virtual const jsg::IsolateObserver& getObserver() const = 0;
   virtual void setIsolateObserver(IsolateObserver&) = 0;
 
