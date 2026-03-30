@@ -1,0 +1,30 @@
+name: Build for Termux
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build workerd for arm64
+        run: |
+          mkdir -p out
+          docker buildx build --platform linux/arm64 -f Dockerfile.release --target artifact --output type=local,dest=out .
+
+      - name: Rename binary
+        run: |
+          mv out/workerd-linux-arm64 out/workerd-android-arm64
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: workerd-android-arm64
+          path: out/workerd-android-arm64
