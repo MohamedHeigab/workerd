@@ -26,7 +26,7 @@ jobs:
               pkg install -y bazel8 nodejs python rust git wget lld binutils libc++ clang &&
               npm install -g pnpm@latest &&
               pnpm install --no-frozen-lockfile &&
-              bazel build --config=release_linux //src/workerd/server:workerd &&
+              bazel8 build --config=release_linux //src/workerd/server:workerd &&
               cp bazel-bin/src/workerd/server/workerd /host-workspace/out/workerd-bionic-arm64
             "
 
