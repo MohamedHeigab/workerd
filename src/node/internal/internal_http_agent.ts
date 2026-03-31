@@ -11,7 +11,6 @@ import type {
   Agent as _Agent,
   AgentOptions,
   ClientRequest,
-  IncomingMessage,
 } from 'node:http';
 import type { Socket, NetConnectOpts } from 'node:net';
 import type { Duplex } from 'node:stream';
