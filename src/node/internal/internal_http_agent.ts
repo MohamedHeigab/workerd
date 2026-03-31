@@ -33,13 +33,13 @@ export class Agent extends EventEmitter implements _Agent {
   totalSocketCount: number;
   readonly freeSockets: NodeJS.ReadOnlyDict<Socket[]> = {};
   readonly sockets: NodeJS.ReadOnlyDict<Socket[]> = {};
-  readonly requests: NodeJS.ReadOnlyDict<IncomingMessage[]> = {};
+  readonly requests: NodeJS.ReadOnlyDict<ClientRequest[]> = {};
 
   constructor(options?: AgentOptions) {
     super({});
     this.options = { __proto__: null, ...options };
 
-    if (this.options.noDelay === undefined) this.options.noDelay = true;
+    if ((this.options as any).noDelay === undefined) (this.options as any).noDelay = true;
 
     // Don't confuse net and make it think that we're connecting to a pipe
     this.keepAliveMsecs = this.options.keepAliveMsecs || 1000;
