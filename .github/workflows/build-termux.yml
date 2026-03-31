@@ -11,18 +11,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip git tcl python3 python3-pip npm
+          sudo npm install -g pnpm@latest @bazel/bazelisk
+
+      - name: Download Android NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux-aarch64.zip
+          unzip -q android-ndk-r26d-linux-aarch64.zip
+          echo "NDK_HOME=$(pwd)/android-ndk-r26d" >> $GITHUB_ENV
+
+      - name: Configure Bazel for NDK
+        run: |
+          cat << 'EOF' >> WORKSPACE
+          android_ndk_repository(
+              name = "androidndk",
+              path = ENV["NDK_HOME"],
+          )
+          EOF
 
       - name: Build workerd for arm64
+        env:
+          NDK_HOME: ${{ env.NDK_HOME }}
         run: |
-          mkdir -p out
-          mkdir -p .bazel-cache
-          docker buildx build --platform linux/arm64 -f Dockerfile.release --target artifact --output type=local,dest=out .
+          pnpm install
+          bazel build \
+            --action_env=NDK_HOME=$NDK_HOME \
+            --crosstool_top=@androidndk//:default_crosstool \
+            --cpu=arm64-v8a \
+            --host_crosstool_top=@bazel_tools//tools/cpp:toolchain \
+            --copt="-D__ANDROID_API__=24" \
+            //src/workerd/server:workerd
 
       - name: Rename binary
         run: |
-          mv out/workerd-linux-arm64 out/workerd-android-arm64
+          mkdir -p out
+          cp bazel-bin/src/workerd/server/workerd out/workerd-android-arm64
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
