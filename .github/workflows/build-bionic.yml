@@ -19,7 +19,7 @@ jobs:
             -w /workerd \
             termux/termux-docker:aarch64 \
             /data/data/com.termux/files/usr/bin/bash -c "
-              pkg update -y &&
+              pkg upgrade -y &&
               pkg install -y tur-repo &&
               pkg install -y bazel8 nodejs python rust git wget lld binutils libc++ clang &&
               npm install -g pnpm@latest &&
