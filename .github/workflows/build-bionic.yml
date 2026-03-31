@@ -36,7 +36,7 @@ jobs:
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
         run: |
-          pnpm install
+          pnpm install --no-frozen-lockfile
           bazel build \
             --action_env=NDK_HOME=$NDK_HOME \
             --crosstool_top=@androidndk//:default_crosstool \
