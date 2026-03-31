@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -19,8 +19,8 @@ jobs:
 
       - name: Download Android NDK
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux-aarch64.zip
-          unzip -q android-ndk-r26d-linux-aarch64.zip
+          wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip -q android-ndk-r26d-linux.zip
           echo "NDK_HOME=$(pwd)/android-ndk-r26d" >> $GITHUB_ENV
 
       - name: Configure Bazel for NDK
