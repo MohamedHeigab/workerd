@@ -36,7 +36,7 @@ jobs:
           termux_step_make() {
               termux_setup_nodejs
               npm install -g pnpm@latest @bazel/bazelisk
-              npx pnpm install
+              npx pnpm install --no-frozen-lockfile
               
               export BAZEL_CACHE="${TERMUX_PKG_SRCDIR}/.bazel-cache"
               mkdir -p "${BAZEL_CACHE}"
