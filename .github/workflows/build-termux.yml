@@ -56,7 +56,7 @@ jobs:
               # termux-packages uses gcc/g++ wrapper for host compiler
               build:termux --host_action_env=CC=/usr/bin/gcc
               build:termux --host_action_env=CXX=/usr/bin/g++
-              BAZELRC
+          BAZELRC
               
               echo "try-import %workspace%/.bazelrc.termux" >> .bazelrc
               
