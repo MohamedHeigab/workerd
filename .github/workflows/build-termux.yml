@@ -41,9 +41,20 @@ jobs:
               export BAZEL_CACHE="${TERMUX_PKG_SRCDIR}/.bazel-cache"
               mkdir -p "${BAZEL_CACHE}"
               
+              # Create a compiler wrapper to prevent Bazel from resolving the NDK clang symlinks
+              # which strips the target architecture prefix from the executable name.
+              mkdir -p "${TERMUX_PKG_SRCDIR}/bazel-compiler"
+              cat << WRAPPER > "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang"
+#!/bin/bash
+exec ${CC} "\$@"
+WRAPPER
+              cat << WRAPPER > "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang++"
+#!/bin/bash
+exec ${CXX} "\$@"
+WRAPPER
+              chmod +x "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang" "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang++"
+              
               cat << 'BAZELRC' > .bazelrc.termux
-              build:termux --action_env=CC
-              build:termux --action_env=CXX
               build:termux --action_env=LD
               build:termux --action_env=AR
               build:termux --action_env=CFLAGS
@@ -53,6 +64,20 @@ jobs:
               build:termux --host_action_env=CC=/usr/bin/gcc
               build:termux --host_action_env=CXX=/usr/bin/g++
           BAZELRC
+              
+              echo "build:termux --action_env=CC=${TERMUX_PKG_SRCDIR}/bazel-compiler/clang" >> .bazelrc.termux
+              echo "build:termux --action_env=CXX=${TERMUX_PKG_SRCDIR}/bazel-compiler/clang++" >> .bazelrc.termux
+
+              # Pass termux CFLAGS and LDFLAGS to bazel
+              for flag in $CFLAGS $CPPFLAGS; do
+                  echo "build:termux --copt=$flag" >> .bazelrc.termux
+              done
+              for flag in $CXXFLAGS $CPPFLAGS; do
+                  echo "build:termux --cxxopt=$flag" >> .bazelrc.termux
+              done
+              for flag in $LDFLAGS; do
+                  echo "build:termux --linkopt=$flag" >> .bazelrc.termux
+              done
               
               echo "try-import %workspace%/.bazelrc.termux" >> .bazelrc
               
