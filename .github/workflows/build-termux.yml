@@ -44,14 +44,12 @@ jobs:
               # Create a compiler wrapper to prevent Bazel from resolving the NDK clang symlinks
               # which strips the target architecture prefix from the executable name.
               mkdir -p "${TERMUX_PKG_SRCDIR}/bazel-compiler"
-              cat << WRAPPER > "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang"
-#!/bin/bash
-exec ${CC} "\$@"
-WRAPPER
-              cat << WRAPPER > "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang++"
-#!/bin/bash
-exec ${CXX} "\$@"
-WRAPPER
+              echo '#!/bin/bash' > "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang"
+              echo 'exec ${CC} "$@"' >> "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang"
+              
+              echo '#!/bin/bash' > "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang++"
+              echo 'exec ${CXX} "$@"' >> "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang++"
+              
               chmod +x "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang" "${TERMUX_PKG_SRCDIR}/bazel-compiler/clang++"
               
               cat << 'BAZELRC' > .bazelrc.termux
