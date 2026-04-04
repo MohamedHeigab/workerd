@@ -2,30 +2,88 @@ name: Build for Termux
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "build-bionic-ndk" ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout workerd
+        uses: actions/checkout@v4
+        with:
+          path: workerd
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Checkout termux-packages
+        uses: actions/checkout@v4
+        with:
+          repository: termux/termux-packages
+          path: termux-packages
 
-      - name: Build workerd for arm64
+      - name: Setup local package build
         run: |
-          mkdir -p out
-          mkdir -p .bazel-cache
-          docker buildx build --platform linux/arm64 -f Dockerfile.release --target artifact --output type=local,dest=out .
+          mkdir -p termux-packages/packages/workerd
+          cat << 'BUILD_SH' > termux-packages/packages/workerd/build.sh
+          TERMUX_PKG_HOMEPAGE=https://github.com/cloudflare/workerd
+          TERMUX_PKG_DESCRIPTION="The JavaScript / Wasm runtime that powers Cloudflare Workers"
+          TERMUX_PKG_LICENSE="Apache-2.0"
+          TERMUX_PKG_MAINTAINER="@termux"
+          TERMUX_PKG_VERSION=1.0.0
+          TERMUX_PKG_SRCURL=file:///home/builder/termux-packages/workerd
+          TERMUX_PKG_BUILD_IN_SRC=true
+          TERMUX_PKG_DEPENDS="libc++"
 
-      - name: Rename binary
+          termux_step_make() {
+              # Install tcl which might be required for building sqlite
+              sudo apt-get update
+              sudo apt-get install -y tcl
+
+              termux_setup_nodejs
+              npm install -g pnpm@latest @bazel/bazelisk
+              pnpm install
+              
+              export BAZEL_CACHE="${TERMUX_PKG_SRCDIR}/.bazel-cache"
+              mkdir -p "${BAZEL_CACHE}"
+              
+              cat << 'BAZELRC' > .bazelrc.termux
+              build:termux --action_env=CC
+              build:termux --action_env=CXX
+              build:termux --action_env=LD
+              build:termux --action_env=AR
+              build:termux --action_env=CFLAGS
+              build:termux --action_env=CXXFLAGS
+              build:termux --action_env=LDFLAGS
+              # termux-packages uses gcc/g++ wrapper for host compiler
+              build:termux --host_action_env=CC=/usr/bin/gcc
+              build:termux --host_action_env=CXX=/usr/bin/g++
+              BAZELRC
+              
+              echo "try-import %workspace%/.bazelrc.termux" >> .bazelrc
+              
+              pnpm exec bazel build --disk_cache="${BAZEL_CACHE}" \
+                  --config=release_linux \
+                  --config=termux \
+                  //src/workerd/server:workerd
+          }
+          
+          termux_step_make_install() {
+              install -Dm755 bazel-bin/src/workerd/server/workerd $TERMUX_PREFIX/bin/workerd
+              
+              # Copy binary for GitHub Actions artifact upload
+              mkdir -p /home/builder/termux-packages/out
+              cp bazel-bin/src/workerd/server/workerd /home/builder/termux-packages/out/workerd-android-arm64
+          }
+          BUILD_SH
+          mv workerd termux-packages/workerd
+
+      - name: Build workerd package
         run: |
-          mv out/workerd-linux-arm64 out/workerd-android-arm64
-
+          cd termux-packages
+          # Execute the build
+          ./scripts/run-docker.sh ./build-package.sh -a aarch64 -I workerd
+          
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: workerd-android-arm64
-          path: out/workerd-android-arm64
+          path: termux-packages/out/workerd-android-arm64
