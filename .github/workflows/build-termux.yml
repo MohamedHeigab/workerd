@@ -80,6 +80,8 @@ jobs:
               echo "try-import %workspace%/.bazelrc.termux" >> .bazelrc
               
               npx pnpm exec bazel build --disk_cache="${BAZEL_CACHE}" \
+                  --jobs=2 \
+                  --local_ram_resources=6144 \
                   --config=release_linux \
                   --config=termux \
                   //src/workerd/server:workerd
