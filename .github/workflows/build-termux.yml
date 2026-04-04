@@ -36,7 +36,7 @@ jobs:
           termux_step_make() {
               termux_setup_nodejs
               npm install -g pnpm@latest @bazel/bazelisk
-              pnpm install
+              npx pnpm install
               
               export BAZEL_CACHE="${TERMUX_PKG_SRCDIR}/.bazel-cache"
               mkdir -p "${BAZEL_CACHE}"
@@ -56,7 +56,7 @@ jobs:
               
               echo "try-import %workspace%/.bazelrc.termux" >> .bazelrc
               
-              pnpm exec bazel build --disk_cache="${BAZEL_CACHE}" \
+              npx pnpm exec bazel build --disk_cache="${BAZEL_CACHE}" \
                   --config=release_linux \
                   --config=termux \
                   //src/workerd/server:workerd
